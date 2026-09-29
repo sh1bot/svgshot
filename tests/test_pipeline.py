@@ -21,6 +21,9 @@ class PipelineTest(unittest.TestCase):
         draw.rectangle((1, 1, 418, 59), fill="white")
         draw.rectangle((109, 60, 110, 268), fill="white")
         draw.line((111, 227, 418, 227), fill="white")
+        image_without_close = image.copy()
+        draw.line((398, 10, 407, 19), fill="#222222")
+        draw.line((407, 10, 398, 19), fill="#222222")
         font = ImageFont.truetype("DejaVuSans.ttf", 12)
         for y, label, selected in ((95, "Publisher", False),
                                    (142, "Path", True),
@@ -39,8 +42,12 @@ class PipelineTest(unittest.TestCase):
         self.assertIn((1,1,418,59), [n.box for n in nodes if n.kind == "rect"])
         self.assertIn((109,60,2,208), [n.box for n in nodes if n.kind == "line"])
         self.assertIn((109,227,310,1), [n.box for n in nodes if n.kind == "line"])
+        self.assertEqual([n.box for n in nodes if n.kind == "close-icon"], [(398,10,10,10)])
+        self.assertFalse(any(n.kind == "close-icon" for n in
+                             flatten(reconstruct(image_without_close, Options(ocr=False)))))
         svg = ElementTree.fromstring(to_svg(scene))
         self.assertEqual(sum(n.tag.endswith("circle") for n in svg.iter()), 4)
+        self.assertEqual(len([n for n in svg.iter() if n.get("data-kind") == "close-icon"]), 1)
 
     def test_framed_selection_and_disabled_button(self):
         image = Image.new("RGB", (360, 210), "#f0f0f0")
