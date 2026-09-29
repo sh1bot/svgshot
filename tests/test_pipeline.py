@@ -43,6 +43,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIn((109,60,2,208), [n.box for n in nodes if n.kind == "line"])
         self.assertIn((109,227,310,1), [n.box for n in nodes if n.kind == "line"])
         self.assertEqual([n.box for n in nodes if n.kind == "close-icon"], [(398,10,10,10)])
+        self.assertFalse(any(n.kind == "dropdown" for n in nodes))
         self.assertFalse(any(n.kind == "close-icon" for n in
                              flatten(reconstruct(image_without_close, Options(ocr=False)))))
         svg = ElementTree.fromstring(to_svg(scene))
