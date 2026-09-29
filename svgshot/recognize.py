@@ -317,7 +317,7 @@ def _dropdowns(image: np.ndarray, texts: list[Node]) -> list[Node]:
         tx, ty, _, _ = label.box
         for y in range(max(1,ty-8),ty+1):
             for x, right, color in _flat_runs(image[y], 100, width-10):
-                if not (tx-8 <= x <= tx and right > tx+80):
+                if not (tx-8 <= x <= tx and right > tx+80 and right < width-8):
                     continue
                 if np.max(np.abs(color.astype(int)-image[y,x-2].astype(int))) < 15:
                     continue
