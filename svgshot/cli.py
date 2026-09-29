@@ -9,6 +9,7 @@ from PIL import Image
 
 from .recognize import Options, reconstruct
 from .svg import to_svg
+from .diagnostic import make_diagnostic
 from .validate import compare
 
 
@@ -18,12 +19,15 @@ def main(argv=None) -> int:
     parser.add_argument("output", type=Path, help="Output SVG")
     parser.add_argument("--config", type=Path, help="JSON recognition options")
     parser.add_argument("--scene", type=Path, help="Save recognized scene graph as JSON")
+    parser.add_argument("--diagnostic", type=Path,
+                        help="Save side-by-side input/output SVG with OCR boxes and baselines")
     parser.add_argument("--report", type=Path, help="Render and compare SVG; write JSON report (needs Inkscape)")
     parser.add_argument("--manifest", type=Path, help="Ground-truth JSON fixture for --report")
     parser.add_argument("--strict", action="store_true", help="Exit nonzero if the report has warnings")
     parser.add_argument("--no-ocr", action="store_true", help="Disable text detection explicitly")
     parser.add_argument("--no-raster", action="store_true", help="Discard unrecognized small details")
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
+    parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
     args = parser.parse_args(argv)
     try:
         if args.input.suffix.lower() != ".png":
@@ -43,8 +47,14 @@ def main(argv=None) -> int:
                 options.raster_fallback = False
             if args.lang:
                 options.language = args.lang
+            if args.font_family:
+                options.font_family = args.font_family
             scene = reconstruct(source, options)
-            args.output.write_text(to_svg(scene), encoding="utf-8")
+            svg = to_svg(scene, options.font_family)
+            args.output.write_text(svg, encoding="utf-8")
+            if args.diagnostic:
+                args.diagnostic.write_text(make_diagnostic(source, svg, scene,
+                                                           options.font_family), encoding="utf-8")
             if args.scene:
                 args.scene.write_text(json.dumps(scene.to_dict(), indent=2)+"\n", encoding="utf-8")
             if args.report:
