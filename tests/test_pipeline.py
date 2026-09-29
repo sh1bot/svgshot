@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
+from svgshot.diagnostic import make_diagnostic
 from svgshot.fixture import generate
 from svgshot.model import flatten
 from svgshot.recognize import Options, reconstruct
@@ -14,6 +15,30 @@ from svgshot.validate import compare, ground_truth
 
 
 class PipelineTest(unittest.TestCase):
+    def test_framed_selection_and_disabled_button(self):
+        image = Image.new("RGB", (360, 210), "#f0f0f0")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, 359, 209), outline="#707070")
+        draw.rectangle((10, 46, 185, 65), fill="#0078d7")
+        font = ImageFont.truetype("DejaVuSans.ttf", 12)
+        draw.text((18, 48), "Conditions", font=font, fill="white")
+        draw.rectangle((220, 160, 315, 187), fill="#dddddd", outline="#999999")
+        draw.text((240, 165), "Create", font=font, fill="#777777")
+        scene = reconstruct(image, Options())
+        self.assertEqual(scene.color, "#f0f0f0")
+        self.assertEqual({n.text for n in flatten(scene) if n.kind == "text"},
+                         {"Conditions", "Create"})
+        svg = to_svg(scene)
+        self.assertIn('fill="#ffffff"', svg)
+        self.assertIn('>Create</text>', svg)
+        self.assertIn('textLength="62"', svg)
+        diagnostic = make_diagnostic(image, svg, scene)
+        xml = ElementTree.fromstring(diagnostic)
+        self.assertEqual(len([n for n in xml.iter() if n.tag.endswith("image") and
+                              n.get("x") == "0" and n.get("y") == "28"]), 1)
+        self.assertEqual(len([n for n in xml.iter() if n.tag.endswith("line")]), 2)
+        self.assertEqual(len([n for n in xml.iter() if n.tag.endswith("title")]), 4)
+
     def test_known_light_and_dark_controls(self):
         for theme in ("light", "dark"):
             with self.subTest(theme=theme), tempfile.TemporaryDirectory() as directory:
