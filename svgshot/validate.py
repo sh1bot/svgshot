@@ -55,12 +55,27 @@ def _geometry(source: Image.Image, rendered: Image.Image, texts: list[Node]) -> 
     softened_a = ndimage.gaussian_filter(src, (3, 3, 0))
     softened_b = ndimage.gaussian_filter(dst, (3, 3, 0))
     color_error = float(np.mean(np.abs(softened_a-softened_b)) / 255)
+    # A global score can hide a bad footer in a large, mostly empty dialog.
+    regions = []
+    for row in range(3):
+        for col in range(2):
+            x0, x1 = width*col//2, width*(col+1)//2
+            y0, y1 = height*row//3, height*(row+1)//3
+            source_edges = a[y0:y1,x0:x1]
+            if source_edges.sum() < 12:
+                continue
+            near = distances_b[y0:y1,x0:x1][source_edges] <= 4
+            regions.append({"box": [x0,y0,x1-x0,y1-y0],
+                            "edge_recall_4px": round(float(near.mean()),3),
+                            "source_edges": int(source_edges.sum())})
     return {"edge_recall_4px": round(recall, 3),
             "edge_precision_4px": round(precision, 3),
-            "blurred_color_error": round(color_error, 3)}
+            "blurred_color_error": round(color_error, 3),
+            "regions": regions}
 
 
-def _text(source: list[Node], rendered: list[Node], image: Image.Image, language: str) -> dict:
+def _text(source: list[Node], rendered: list[Node], image: Image.Image,
+          language: str, threshold: float = .75) -> dict:
     found = set()
     matches = []
     for item in source:
@@ -75,7 +90,7 @@ def _text(source: list[Node], rendered: list[Node], image: Image.Image, language
                 continue
             if similarity > best[0]:
                 best = similarity, i
-        if best[1] is not None and best[0] >= .75:
+        if best[1] is not None and best[0] >= threshold:
             found.add(best[1])
             matches.append(item.text)
             continue
@@ -85,7 +100,7 @@ def _text(source: list[Node], rendered: list[Node], image: Image.Image, language
         if right > left and bottom > top:
             local = _ocr(image.crop((left,top,right,bottom)), language, psm=7)
             if any(difflib.SequenceMatcher(None, item.text.casefold(),
-                                          candidate.text.casefold()).ratio() >= .75
+                                          candidate.text.casefold()).ratio() >= threshold
                    for candidate in local):
                 matches.append(item.text)
     return {"source_lines": len(source), "rendered_lines": len(rendered),
@@ -155,6 +170,12 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
                        for previous in detected):
                 detected.append(candidate)
         report["text"] = _text(original_text, detected, rendered, language)
+        # Segment the input independently from reconstruction. A self-check
+        # against scene text alone rewards confident OCR hallucinations.
+        reference = [item for item in _ocr(source,language,psm=6)
+                     if item.confidence >= .75]
+        report["source_text"] = _text(reference, detected, rendered, language,
+                                      threshold=.86)
     if manifest:
         report["ground_truth"] = ground_truth(scene, manifest)
     report["warnings"] = []
@@ -162,6 +183,8 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
         report["warnings"].append("Many source edges are missing or displaced")
     if ocr and report["text"]["recall"] is not None and report["text"]["recall"] < .8:
         report["warnings"].append("Rendered text is not reliably readable by OCR")
+    if ocr and report["source_text"]["recall"] is not None and report["source_text"]["recall"] < .85:
+        report["warnings"].append("Text visible in the input is missing or changed in the SVG")
     if manifest and report["ground_truth"]["matched"] < report["ground_truth"]["expected"]:
         report["warnings"].append("Known fixture elements were missed")
     return report
