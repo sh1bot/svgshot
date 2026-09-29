@@ -94,7 +94,7 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         kind = node.kind
         paint = node.color
         grouped = kind in ("button", "outlined-button", "radio", "radio-selected",
-                           "checkbox", "radio-group")
+                           "checkbox", "checkbox-selected", "dropdown", "radio-group")
         if grouped:
             parts.append(f'<g data-kind="{kind}">')
         if kind == "text":
@@ -119,12 +119,27 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'rx="{min(4, h/6):g}" fill="{paint}"/>')
             surface = paint
-        elif kind in ("outline", "outlined-button", "checkbox"):
-            stroke = _contrast(paint, surface, 3)
+        elif kind in ("outline", "outlined-button", "checkbox", "checkbox-selected"):
+            stroke = paint if kind == "outline" else _contrast(paint, surface, 3)
             parts.append(f'<rect x="{x+.5:g}" y="{y+.5:g}" width="{max(0,w-1)}" '
                          f'height="{max(0,h-1)}" rx="{min(4,h/6):g}" '
                          f'fill="{node.background or "none"}" stroke="{stroke}" stroke-width="1.2"/>')
+            if kind == "checkbox-selected":
+                parts.append(f'<path d="M{x+3} {y+h/2:g} L{x+5.5:g} {y+h-3} '
+                             f'L{x+w-2} {y+3}" fill="none" stroke="{stroke}" '
+                             f'stroke-width="1.4"/>')
             surface = node.background or surface
+        elif kind == "dropdown":
+            parts.append(f'<rect x="{x+.5:g}" y="{y+.5:g}" width="{w-1}" height="{h-1}" '
+                         f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
+            arrow = "#999999" if int(node.background[1:3],16) < 215 else "#606060"
+            parts.append(f'<path d="M{x+w-13} {y+h/2-2:g} l4 4 4 -4" '
+                         f'fill="none" stroke="{arrow}" stroke-width="1"/>')
+        elif kind in ("tab", "tab-active"):
+            parts.append(f'<rect x="{x+.5:g}" y="{y+.5:g}" width="{w-1}" height="{h-1}" '
+                         f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
+            if kind == "tab-active":
+                parts.append(f'<path d="M{x+1} {y+h-1} h{w-2}" stroke="#ffffff"/>')
         elif kind == "line":
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')
         elif kind == "close-icon":
@@ -139,9 +154,16 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         if grouped:
             parts.append('</g>')
 
-    # Text goes last, including text inside controls.
+    # Surfaces precede controls; tiny title-bar icons must remain above even
+    # broad rectangles recovered later by the quantized geometry pass.
+    surfaces = [n for n in root.children if n.kind == "rect" and n.box[2]*n.box[3] > 1000]
+    for node in sorted(surfaces,key=lambda n:n.box[2]*n.box[3],reverse=True):
+        draw(node, root.color)
     for node in root.children:
-        if node.kind != "text":
+        if node not in surfaces and node.kind not in ("text", "close-icon"):
+            draw(node, root.color)
+    for node in root.children:
+        if node.kind == "close-icon":
             draw(node, root.color)
     for node in root.children:
         if node.kind == "text":
