@@ -26,6 +26,7 @@ PNG regions for details the recognizer cannot confidently describe. Use
 
 ```sh
 svgshot screenshot.png screenshot.svg --scene scene.json \
+  --diagnostic text-boxes.svg \
   --report quality.json --strict
 ```
 
@@ -33,6 +34,9 @@ The CLI returns 0 on successful conversion, 1 on errors, and 2 with `--strict`
 when the comparison report has warnings. It writes the SVG and report before
 returning 2. `--report` renders the SVG through Inkscape. The optional scene
 JSON exposes bounding boxes, hierarchy, and recognition confidence for tuning.
+The diagnostic SVG displays input and output side by side, with magenta OCR
+boxes on both and cyan text baselines on the output. Hover over a box to read
+its recognized text. It does not require Inkscape.
 
 ## Tuning
 
@@ -45,7 +49,8 @@ Provide `--config settings.json`, for example:
   "max_raster": 128,
   "raster_fallback": true,
   "ocr": true,
-  "language": "eng"
+  "language": "eng",
+  "font_family": "auto"
 }
 ```
 
@@ -55,6 +60,9 @@ the width or height of a retained unknown detail. The other options are
 self-explanatory. `--lang` overrides the OCR language. Try a few settings on
 your own screenshot corpus and inspect both SVG and report; there is no
 universal setting for every UI.
+`auto` uses Segoe UI when installed on Windows and Arial elsewhere. You can
+set `--font-family "Segoe UI"` to fit and render with a specific installed font.
+This controls SVG typography; it is not a Tesseract recognition hint.
 
 ## Validation
 
