@@ -87,7 +87,11 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
         words.sort(key=lambda w: w[0])
         # OCR frequently mistakes a radio ring beside a label for © or ®.
         # Let the geometry stage see the original pixels in that box.
-        if len(words) > 1 and words[0][4] in ("©", "®", "○", "◉", "O", "@", "(@)", "[_]"):
+        symbol = words[0][4]
+        looks_like_control = (symbol in ("©", "®", "○", "◉", "O", "0") or
+                              (len(symbol) <= 3 and (symbol.startswith("@") or
+                                                       not any(ch.isalnum() for ch in symbol))))
+        if len(words) > 1 and looks_like_control:
             first, second = words[:2]
             if 7 <= first[2] <= 28 and 0 <= second[0]-(first[0]+first[2]) <= 28:
                 words = words[1:]
@@ -166,6 +170,90 @@ def _contains(parent: Node, child: Node, tolerance=3) -> bool:
             a+c <= x+w+tolerance and b+d <= y+h+tolerance)
 
 
+def _radio_from_pixels(image: np.ndarray, box) -> tuple[tuple[int,int,int,int], bool, str] | None:
+    """Fit the outer ring and read selection from its center, not its fill."""
+    x, y, w, h = box
+    height, width = image.shape[:2]
+    left, top = max(0,x-2), max(0,y-2)
+    right, bottom = min(width,x+w+2), min(height,y+h+2)
+    patch = image[top:bottom, left:right].astype(np.int16)
+    if min(patch.shape[:2]) < 7:
+        return None
+    corners = np.array([patch[0,0],patch[0,-1],patch[-1,0],patch[-1,-1]])
+    background = np.median(corners, axis=0)
+    difference = np.max(np.abs(patch-background), axis=2)
+    yy, xx = np.nonzero(difference > 55)
+    if len(xx) < 12:
+        return None
+    x0, x1, y0, y1 = xx.min(), xx.max()+1, yy.min(), yy.max()+1
+    diameter_x, diameter_y = x1-x0, y1-y0
+    if not (9 <= diameter_x <= 24 and 9 <= diameter_y <= 24 and
+            .75 <= diameter_x/diameter_y <= 1.33):
+        return None
+    shape = difference[y0:y1, x0:x1] > 55
+    corners = np.r_[shape[:2,:2].ravel(), shape[:2,-2:].ravel(),
+                    shape[-2:,:2].ravel(), shape[-2:,-2:].ravel()]
+    if corners.mean() >= .45:  # Square checkbox border, not a circular ring.
+        return None
+    cx, cy = (x0+x1-1)/2, (y0+y1-1)/2
+    center = difference[max(0,round(cy)-1):round(cy)+2,
+                        max(0,round(cx)-1):round(cx)+2]
+    selected = float(np.mean(center > 55)) > .55
+    radii = np.hypot((xx-cx)/(diameter_x/2), (yy-cy)/(diameter_y/2))
+    ring_pixels = patch[yy[radii > .65], xx[radii > .65]]
+    color = _hex(np.median(ring_pixels, axis=0)) if len(ring_pixels) else "#555555"
+    return tuple(map(int, (left+x0, top+y0, diameter_x, diameter_y))), selected, color
+
+
+def _structure(image: np.ndarray) -> list[Node]:
+    """Recover broad white header surfaces and long pale panel dividers."""
+    height, width = image.shape[:2]
+    if height < 60 or width < 100:
+        return []
+    white = np.min(image, axis=2) >= 250
+    nodes = []
+    # A wide run of white rows at the top is a distinct surface, even when
+    # palette quantization merges it with the surrounding light grey.
+    row_fraction = white[:, 2:width-2].mean(axis=1)
+    header_rows = np.flatnonzero(row_fraction[:height//2] > .8)
+    start = 0
+    end = 0
+    if len(header_rows):
+        runs = np.split(header_rows, np.where(np.diff(header_rows) > 1)[0]+1)
+        top_run = max(runs, key=len)
+        if len(top_run) >= 12 and top_run[0] <= 4:
+            start, end = int(top_run[0]), int(top_run[-1])+1
+            color = _hex(np.median(image[start:end, 2:width-2].reshape(-1,3), axis=0))
+            nodes.append(Node("rect", (1,start,width-2,end-start), color))
+    from_y = max(end, 2)
+    if height-from_y < 40:
+        return nodes
+    # Adjacent one-pixel white columns form a single divider. Check the
+    # neighboring columns so a broad white panel is not misread as a line.
+    column_fraction = white[from_y:height-2].mean(axis=0)
+    columns = np.flatnonzero(column_fraction > .85)
+    for group in np.split(columns, np.where(np.diff(columns) > 1)[0]+1) if len(columns) else []:
+        left, right = int(group[0]), int(group[-1])+1
+        if not (1 <= right-left <= 3 and 2 <= left and right < width-2):
+            continue
+        if column_fraction[left-1] < .25 and column_fraction[right] < .25:
+            nodes.append(Node("line", (left,from_y,right-left,height-from_y-2), "#ffffff"))
+    # Isolated long white rows delimit footer/control regions.
+    for y in range(from_y+1,height-2):
+        row = white[y]
+        labels, count = ndimage.label(row)
+        if not count:
+            continue
+        slices = ndimage.find_objects(labels)
+        run = max((s[0] for s in slices if s), key=lambda s:s.stop-s.start)
+        left, right = run.start, run.stop
+        if right-left < width*.35:
+            continue
+        if white[y-1,left:right].mean() < .15 and white[y+1,left:right].mean() < .15:
+            nodes.append(Node("line", (left,y,right-left,1), "#ffffff"))
+    return nodes
+
+
 def reconstruct(image: Image.Image, options: Options) -> Node:
     if image.width * image.height > 25_000_000:
         raise ValueError("PNG exceeds the 25-megapixel limit")
@@ -174,6 +262,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     h, w = pixels.shape[:2]
     background = _background(pixels)
     root = Node("window", (0, 0, w, h), _hex(background))
+    structural = _structure(pixels)
     texts = _ocr(rgb_image, options.language) if options.ocr else []
     reserved = np.zeros((h, w), dtype=bool)
     for node in texts:
@@ -267,34 +356,29 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     # Keep a shallow semantic hierarchy; preserve paint order by drawing large
     # surfaces before controls, and text last.
     candidates.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
+    consumed = set()
     for node in candidates:
-        if node.kind in ("circle", "ring") and node.box[2] <= 28:
-            right = node.box[0] + node.box[2]
-            nearby = [t for t in texts if 0 <= t.box[0]-right <= 28 and
-                      abs((t.box[1]+t.box[3]/2)-(node.box[1]+node.box[3]/2)) < 10]
-            if nearby:
-                node.kind = "radio" if node.kind == "ring" else "radio-selected"
+        if node.kind in ("circle", "ring", "raster") and 8 <= node.box[2] <= 24 and 8 <= node.box[3] <= 24:
+            right = node.box[0]+node.box[2]
+            nearby = any(0 <= t.box[0]-right <= 30 and
+                         abs((t.box[1]+t.box[3]/2)-(node.box[1]+node.box[3]/2)) < 12
+                         for t in texts)
+            fitted = _radio_from_pixels(pixels, node.box) if nearby else None
+            if fitted:
+                node.box, selected, node.color = fitted
+                node.kind = "radio-selected" if selected else "radio"
+                node.image_data = ""
+                for other in candidates:
+                    if other is node or other.kind not in ("circle", "ring", "raster"):
+                        continue
+                    if _contains(node, other, 2) and other.box[2]*other.box[3] <= node.box[2]*node.box[3]:
+                        consumed.add(id(other))
         elif node.kind in ("rect", "outline") and node.box[2] <= 28 and node.box[3] <= 28:
             right = node.box[0] + node.box[2]
             if any(0 <= t.box[0]-right <= 28 and
                    abs((t.box[1]+t.box[3]/2)-(node.box[1]+node.box[3]/2)) < 10 for t in texts):
                 node.kind = "checkbox"
-    # A selected radio's central dot may be a separate color component.
-    consumed = set()
-    for radio in candidates:
-        if radio.kind != "radio":
-            continue
-        x, y, rw, rh = radio.box
-        for i, dot in enumerate(candidates):
-            if dot is radio or i in consumed:
-                continue
-            dx, dy, dw, dh = dot.box
-            if (x+3 <= dx and y+3 <= dy and dx+dw <= x+rw-3 and
-                    dy+dh <= y+rh-3 and max(dw,dh) <= 11):
-                radio.kind = "radio-selected"
-                consumed.add(i)
-                break
-    candidates = [n for i,n in enumerate(candidates) if i not in consumed]
+    candidates = [n for n in candidates if id(n) not in consumed]
     if options.ocr:
         examined = 0
         for control in candidates:
@@ -314,7 +398,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                 local.color = _hex(_pixel_color(pixels, local.box))
                 if not any(_contains(t, local, 5) for t in texts):
                     texts.append(local)
-    root.children = candidates
+    root.children = structural + candidates
     for text in texts:
         parents = [n for n in candidates if n.kind in ("rect", "outline", "outlined-button") and
                    n.box[2] > text.box[2]+8 and _contains(n, text)]
