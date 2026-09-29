@@ -238,6 +238,174 @@ def _close_icon(image: np.ndarray) -> Node | None:
     return None
 
 
+def _group_frames(image: np.ndarray) -> list[Node]:
+    """Recover thin, low-contrast group boxes from their paired side rails."""
+    height, width = image.shape[:2]
+    frames = []
+    for x in range(12, width-110):
+        column = image[:, x]
+        changes = np.r_[0, np.flatnonzero(np.any(column[1:] != column[:-1], axis=1))+1, height]
+        for top, bottom in zip(changes[:-1], changes[1:]):
+            if not (35 <= bottom-top <= 130 and 50 < top < height-25):
+                continue
+            color = column[top]
+            outside = image[top:min(bottom,height), x-2]
+            if np.median(np.max(np.abs(outside.astype(int)-color.astype(int)), axis=1)) < 10:
+                continue
+            row = image[bottom-1, x:width-8]
+            same = np.all(row == color, axis=1)
+            if len(same) < 100 or not same[0]:
+                continue
+            end = int(np.flatnonzero(~same)[0]) if (~same).any() else len(same)
+            if end < 100:
+                continue
+            right = x+end-1
+            if np.mean(np.all(image[top:bottom, right] == color, axis=1)) < .95:
+                continue
+            box = (x, int(top), end, int(bottom-top))
+            if any(abs(old.box[0]-x) <= 3 and abs(old.box[1]-top) <= 3 for old in frames):
+                continue
+            frames.append(Node("outline", box, _hex(color)))
+    return frames
+
+
+def _checkboxes(image: np.ndarray, texts: list[Node]) -> list[Node]:
+    """Read square controls beside labels directly, including their checkmarks."""
+    height, width = image.shape[:2]
+    controls = []
+    for text in texts:
+        if not (7 <= text.box[3] <= 18 and text.box[0] >= 35 and
+                text.box[1] < height-45):
+            continue
+        tx, ty, _, th = text.box
+        for x in range(tx-21, tx-13):
+            for y in range(ty-4, ty+1):
+                if x < 1 or y < 1 or x+13 >= width or y+13 >= height:
+                    continue
+                patch = image[y:y+13, x:x+13]
+                border = np.r_[patch[0], patch[-1], patch[:,0], patch[:,-1]]
+                if (np.max(np.std(border.astype(float), axis=0)) > 25 or
+                        np.mean(np.max(np.abs(border.astype(int)-image[y,x-1].astype(int)), axis=1)) < 30 or
+                        np.max(np.abs(np.median(border,axis=0)-patch[1,1])) < 30):
+                    continue
+                if not np.all(np.max(np.abs(patch[1:-1,1:-1].astype(int)-patch[1,1].astype(int)),axis=2) < 220):
+                    continue
+                selected = np.mean(np.min(patch[3:-3,3:-3],axis=2) < 125) > .07
+                controls.append(Node("checkbox-selected" if selected else "checkbox",
+                                     (x,y,13,13), _hex(np.median(border,axis=0)),
+                                     background=_hex(patch[1,1])))
+                break
+            else:
+                continue
+            break
+    return controls
+
+
+def _flat_runs(row: np.ndarray, minimum: int, maximum: int):
+    ends = np.r_[0, np.flatnonzero(np.any(row[1:] != row[:-1], axis=1))+1, len(row)]
+    for left, right in zip(ends[:-1], ends[1:]):
+        if minimum <= right-left <= maximum:
+            yield int(left), int(right), row[left]
+
+
+def _dropdowns(image: np.ndarray, texts: list[Node]) -> list[Node]:
+    height, width = image.shape[:2]
+    found = []
+    for label in texts:
+        if not (7 <= label.box[3] <= 20 and 20 <= label.box[0] < width-100):
+            continue
+        tx, ty, _, _ = label.box
+        for y in range(max(1,ty-8),ty+1):
+            for x, right, color in _flat_runs(image[y], 100, width-10):
+                if not (tx-8 <= x <= tx and right > tx+80):
+                    continue
+                if np.max(np.abs(color.astype(int)-image[y,x-2].astype(int))) < 15:
+                    continue
+                if np.max(np.abs(color.astype(int)-image[y+4,x+12].astype(int))) < 10:
+                    continue
+                for bottom in range(y+16,min(height,y+31)):
+                    if np.mean(np.all(image[bottom,x:right] == color,axis=1)) < .98:
+                        continue
+                    found.append(Node("dropdown", (x,y,right-x,bottom-y+1),
+                                      _hex(color), background=_hex(image[y+4,x+12])))
+                    break
+            if found and found[-1].box[1] == y:
+                break
+    return found
+
+
+def _footer_buttons(image: np.ndarray, source: Image.Image, language: str) -> tuple[list[Node], list[Node]]:
+    height, width = image.shape[:2]
+    controls, labels = [], []
+    for y in range(max(1,height-65),height-17):
+        for x, right, color in _flat_runs(image[y], 50, min(150,width//2)):
+            if len(controls) >= 12:
+                return controls, labels
+            if x < 2 or right >= width-2 or np.max(np.abs(color.astype(int)-image[y,x-2].astype(int))) < 20:
+                continue
+            if np.max(np.abs(color.astype(int)-image[y+4,x+5].astype(int))) < 10:
+                continue
+            if any(abs(x-control.box[0]) < 3 and abs(y-control.box[1]) < 3 for control in controls):
+                continue
+            bottoms = [bottom for bottom in range(y+17,min(height,y+34))
+                       if np.mean(np.all(image[bottom,x:right] == color,axis=1)) >= .98]
+            for bottom in reversed(bottoms):
+                crop = source.crop((x,y,right,bottom+1))
+                recognized = [t for t in _ocr(crop,language,psm=7)
+                              if t.confidence >= .7 and any(c.isalpha() for c in t.text)]
+                if len(recognized) != 1:
+                    break
+                label = recognized[0]
+                lx,ly,lw,lh = label.box
+                label.box = (x+lx,y+ly,lw,lh)
+                controls.append(Node("outlined-button", (x,y,right-x,bottom-y+1),
+                                     _hex(color), background=_hex(image[y+4,x+5])))
+                labels.append(label)
+                break
+    return controls, labels
+
+
+def _tabs(image: np.ndarray, source: Image.Image, language: str) -> tuple[list[Node], list[Node]]:
+    """Find the active white tab and its neighboring inactive tab."""
+    height, width = image.shape[:2]
+    if width < 160 or height < 110:
+        return [], []
+    for y in range(32, min(65,height-24)):
+        for x, right, border in _flat_runs(image[y], 45, 150):
+            if not (5 <= x <= 20 and 195 <= np.min(border) <= 235):
+                continue
+            if not np.all(np.min(image[y+1,x+2:right-2],axis=1) >= 250):
+                continue
+            # The selected tab's right border continues down to the panel.
+            bottom = y+22
+            if bottom >= height or np.mean(np.all(image[y+1:bottom-1,right-1] == border,axis=1)) < .8:
+                continue
+            neighbors = [(a,b,c) for a,b,c in _flat_runs(image[y+2], 40, 125)
+                         if abs(a-(right-1)) <= 2 and np.max(np.abs(c.astype(int)-border.astype(int))) <= 3]
+            if not neighbors:
+                continue
+            _, next_right, _ = neighbors[0]
+            active_box = (x,y,right-x,bottom-y)
+            inactive_box = (right-1,y+2,next_right-right+2,bottom-y-2)
+            labels = []
+            for bx,by,bw,bh in (active_box,inactive_box):
+                local = [t for t in _ocr(source.crop((bx,by,bx+bw,by+bh)),language,psm=7)
+                         if t.confidence > .7 and any(c.isalpha() for c in t.text)]
+                if len(local) != 1:
+                    break
+                t = local[0]
+                tx,ty,tw,th = t.box
+                t.box = (bx+tx,by+ty,tw,th)
+                labels.append(t)
+            if len(labels) != 2:
+                continue
+            return ([Node("tab-active",active_box,_hex(border),background="#ffffff"),
+                     Node("tab",inactive_box,_hex(border),background="#f0f0f0"),
+                     Node("line",(next_right,bottom-2,width-next_right-9,1),_hex(border)),
+                     Node("line",(x+1,bottom-1,width-x-11,1),"#ffffff")], labels)
+    return [], []
+
+
 def _structure(image: np.ndarray) -> list[Node]:
     """Recover broad white header surfaces and long pale panel dividers."""
     height, width = image.shape[:2]
@@ -245,6 +413,16 @@ def _structure(image: np.ndarray) -> list[Node]:
         return []
     white = np.min(image, axis=2) >= 250
     nodes = []
+    interior = np.median(image[2:height-2:5,2:width-2:5].reshape(-1,3),axis=0)
+    # Screen captures often include a one-pixel window frame with a color
+    # unrelated to the dominant interior surface.
+    for box, sample in (((0,0,1,height),image[:,0]),
+                        ((width-1,0,1,height),image[:,width-1]),
+                        ((0,0,width,1),image[0]),
+                        ((0,height-1,width,1),image[height-1])):
+        color = np.median(sample.reshape(-1,3),axis=0)
+        if np.max(np.abs(color-interior)) > 40:
+            nodes.append(Node("line",box,_hex(color)))
     # A wide run of white rows at the top is a distinct surface, even when
     # palette quantization merges it with the surrounding light grey.
     row_fraction = white[:, 2:width-2].mean(axis=1)
@@ -261,6 +439,7 @@ def _structure(image: np.ndarray) -> list[Node]:
     close = _close_icon(image)
     if close:
         nodes.append(close)
+    nodes.extend(_group_frames(image))
     from_y = max(end, 2)
     if height-from_y < 40:
         return nodes
@@ -300,6 +479,37 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     root = Node("window", (0, 0, w, h), _hex(background))
     structural = _structure(pixels)
     texts = _ocr(rgb_image, options.language) if options.ocr else []
+    if options.ocr:
+        # Page segmentation modes fail differently on compact dialogs. Prefer
+        # the higher-confidence reading of a shared line; keep isolated lines.
+        for alternate in _ocr(rgb_image, options.language, psm=6):
+            overlaps = [t for t in texts if
+                        max(t.box[1], alternate.box[1]) < min(t.box[1]+t.box[3], alternate.box[1]+alternate.box[3]) and
+                        max(t.box[0], alternate.box[0]) < min(t.box[0]+t.box[2], alternate.box[0]+alternate.box[2])]
+            if not overlaps:
+                texts.append(alternate)
+            elif len(overlaps) == 1 and alternate.confidence > overlaps[0].confidence+.08 and (
+                    alternate.box[2] < overlaps[0].box[2]*1.6):
+                texts.remove(overlaps[0])
+                texts.append(alternate)
+        footer, footer_labels = _footer_buttons(pixels, rgb_image, options.language)
+        for label in footer_labels:
+            texts = [t for t in texts if not (
+                max(t.box[0],label.box[0]) < min(t.box[0]+t.box[2],label.box[0]+label.box[2]) and
+                max(t.box[1],label.box[1]) < min(t.box[1]+t.box[3],label.box[1]+label.box[3]))]
+            texts.append(label)
+        tabs, tab_labels = _tabs(pixels, rgb_image, options.language)
+        if tab_labels:
+            tab_top = min(t.box[1] for t in tab_labels)-4
+            tab_bottom = max(t.box[1]+t.box[3] for t in tab_labels)+4
+            texts = [t for t in texts if not (tab_top <= t.box[1] < tab_bottom and
+                                               t.box[0] < tab_labels[-1].box[0]+tab_labels[-1].box[2])]
+            texts.extend(tab_labels)
+    else:
+        footer, tabs = [], []
+    checkboxes = _checkboxes(pixels, texts)
+    dropdowns = _dropdowns(pixels, texts)
+    controls = checkboxes + dropdowns + footer + tabs
     reserved = np.zeros((h, w), dtype=bool)
     for node in texts:
         x, y, tw, th = node.box
@@ -377,6 +587,9 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
 
     # A colored/outlined control can produce both a vector candidate and an
     # unknown outer component. Keeping that outer crop duplicates its text.
+    candidates = [node for node in candidates if not (
+        (node.kind == "outline" and node.box[2] > w*.7 and node.box[3] > h*.65) or
+        any(_contains(control,node,3) or _contains(node,control,3) for control in controls))]
     candidates = [node for node in candidates if node.kind != "raster" or not any(
         other.kind in ("rect", "outline", "outlined-button") and
         other.box[2]*other.box[3] >= node.box[2]*node.box[3]*.55 and
@@ -434,7 +647,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                 local.color = _hex(_pixel_color(pixels, local.box))
                 if not any(_contains(t, local, 5) for t in texts):
                     texts.append(local)
-    root.children = structural + candidates
+    root.children = structural + candidates + controls
     for text in texts:
         parents = [n for n in candidates if n.kind in ("rect", "outline", "outlined-button") and
                    n.box[2] > text.box[2]+8 and _contains(n, text)]
