@@ -24,6 +24,7 @@ class Options:
     raster_fallback: bool = True
     ocr: bool = True
     language: str = "eng"
+    font_family: str = "auto"
 
     @classmethod
     def from_file(cls, path: str | None) -> "Options":
@@ -37,6 +38,8 @@ class Options:
         result = cls(**data)
         if not 2 <= result.colors <= 32 or result.min_area < 1 or result.max_raster < 0:
             raise ValueError("colors must be 2–32, min_area positive, max_raster nonnegative")
+        if not result.font_family or len(result.font_family) > 100:
+            raise ValueError("font_family must be a nonempty font name")
         return result
 
 
@@ -52,7 +55,13 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
     if not shutil.which("tesseract"):
         raise RuntimeError("Tesseract OCR is required (install it or pass --no-ocr)")
     data = io.BytesIO()
-    image.convert("RGB").save(data, format="PNG")
+    # Small Windows UI fonts are commonly 9–12 pixels high. Doubling before
+    # OCR recovers words that Tesseract otherwise splits or drops entirely.
+    scale = 2 if image.width <= 1200 and image.height <= 1000 else 1
+    sample = image.convert("RGB")
+    if scale == 2:
+        sample = sample.resize((sample.width*2, sample.height*2), Image.Resampling.BICUBIC)
+    sample.save(data, format="PNG")
     result = subprocess.run(
         ["tesseract", "stdin", "stdout", "-l", language, "--psm", str(psm), "tsv"],
         input=data.getvalue(), capture_output=True, check=False,
@@ -66,7 +75,7 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
         word = row["text"].strip()
         try:
             confidence = float(row["conf"])
-            x, y, w, h = (int(row[k]) for k in ("left", "top", "width", "height"))
+            x, y, w, h = (round(int(row[k])/scale) for k in ("left", "top", "width", "height"))
         except (ValueError, KeyError):
             continue
         if not word or confidence < 35 or w <= 0 or h <= 0:
@@ -78,7 +87,7 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
         words.sort(key=lambda w: w[0])
         # OCR frequently mistakes a radio ring beside a label for © or ®.
         # Let the geometry stage see the original pixels in that box.
-        if len(words) > 1 and words[0][4] in ("©", "®", "○", "◉", "O"):
+        if len(words) > 1 and words[0][4] in ("©", "®", "○", "◉", "O", "@", "(@)", "[_]"):
             first, second = words[:2]
             if 7 <= first[2] <= 28 and 0 <= second[0]-(first[0]+first[2]) <= 28:
                 words = words[1:]
@@ -110,11 +119,13 @@ def _pixel_color(image: np.ndarray, box, pad=2):
 
 def _background(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
-    border = np.concatenate((image[0], image[-1], image[:, 0], image[:, -1]))
-    quant = ((border.astype(np.uint16) + 8) // 16).clip(0, 15)
+    # The outer pixel is often a window frame, not a background. Use the
+    # dominant color over the interior instead of a border sample.
+    interior = image[2:max(3,h-2):3, 2:max(3,w-2):3].reshape(-1, 3)
+    quant = ((interior.astype(np.uint16) + 8) // 16).clip(0, 15)
     key = quant[:, 0] * 256 + quant[:, 1] * 16 + quant[:, 2]
     common = Counter(key.tolist()).most_common(1)[0][0]
-    return np.median(border[key == common], axis=0).astype(np.uint8)
+    return np.median(interior[key == common], axis=0).astype(np.uint8)
 
 
 def _classify(component: np.ndarray, width: int, height: int) -> tuple[str, float]:
@@ -200,14 +211,58 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             if area < options.min_area or bw < 2 or bh < 2 or bw*bh > w*h*.85:
                 continue
             box = (xs.start, ys.start, bw, bh)
-            kind, confidence = _classify(labels[region] == label, bw, bh)
+            component = labels[region] == label
+            kind, confidence = _classify(component, bw, bh)
             if kind == "unknown":
                 if not options.raster_fallback or max(bw, bh) > options.max_raster or area < 35:
                     continue
                 node = Node("raster", box, confidence=confidence, image_data=_raster(rgb_image, box))
             else:
-                node = Node(kind, box, _hex(color), confidence=confidence)
+                # Quantization is only for segmentation: using the palette's
+                # averaged color can wash out a selected blue row to pale cyan.
+                original_color = np.median(pixels[region][component], axis=0)
+                node = Node(kind, box, _hex(original_color), confidence=confidence)
+                if kind == "outline" and bw >= 30 and bh >= 16:
+                    inner = pixels[ys.start+3:ys.stop-3, xs.start+3:xs.stop-3]
+                    if inner.size:
+                        node.background = _hex(np.median(inner.reshape(-1,3), axis=0))
             candidates.append(node)
+
+    # A button border sometimes quantizes into an irregular ring. When a short
+    # rectangular crop encloses OCR text, replace that crop with a clean button.
+    for node in candidates:
+        if node.kind != "raster":
+            continue
+        x, y, bw, bh = node.box
+        if not (50 <= bw <= 220 and 16 <= bh <= 50 and
+                any(_contains(node, t, 2) for t in texts)):
+            continue
+        crop = pixels[y:y+bh, x:x+bw]
+        if bh < 6 or bw < 12:
+            continue
+        edges = np.concatenate((crop[0, 4:-4], crop[-1, 4:-4],
+                                crop[3:-3, 0], crop[3:-3, -1]))
+        if np.max(np.std(edges.astype(float), axis=0)) > 35:
+            continue
+        node.kind = "outlined-button"
+        node.color = _hex(np.median(edges, axis=0))
+        node.background = _hex(np.median(crop[3:-3, 3:-3].reshape(-1,3), axis=0))
+        node.image_data = ""
+        node.confidence = .7
+
+    # A colored/outlined control can produce both a vector candidate and an
+    # unknown outer component. Keeping that outer crop duplicates its text.
+    candidates = [node for node in candidates if node.kind != "raster" or not any(
+        other.kind in ("rect", "outline", "outlined-button") and
+        other.box[2]*other.box[3] >= node.box[2]*node.box[3]*.55 and
+        (_contains(node, other, 1) or _contains(other, node, 1))
+        for other in candidates if other is not node)]
+    candidates = [node for node in candidates if node.kind != "outlined-button" or not any(
+        other is not node and other.kind == "outlined-button" and
+        other.box[2]*other.box[3] > node.box[2]*node.box[3] and
+        node.box[2]*node.box[3] >= other.box[2]*other.box[3]*.7 and
+        _contains(other, node, 2)
+        for other in candidates)]
 
     # Keep a shallow semantic hierarchy; preserve paint order by drawing large
     # surfaces before controls, and text last.
@@ -244,7 +299,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
         examined = 0
         for control in candidates:
             x, y, cw, ch = control.box
-            if control.kind not in ("rect", "outline") or not (55 <= cw <= 300 and 24 <= ch <= 65):
+            if control.kind not in ("rect", "outline", "outlined-button") or not (55 <= cw <= 300 and 18 <= ch <= 65):
                 continue
             if any(_contains(control, t) for t in texts):
                 continue
@@ -261,7 +316,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                     texts.append(local)
     root.children = candidates
     for text in texts:
-        parents = [n for n in candidates if n.kind in ("rect", "outline") and
+        parents = [n for n in candidates if n.kind in ("rect", "outline", "outlined-button") and
                    n.box[2] > text.box[2]+8 and _contains(n, text)]
         if parents:
             parent = min(parents, key=lambda n: n.box[2]*n.box[3])
