@@ -71,16 +71,19 @@ changes. The report keeps several checks separate:
 
 | Field | What it measures | Interpretation |
 | --- | --- | --- |
-| `edge_recall_4px` | Source edges with an output edge within 4 pixels, excluding OCR text regions | Low values suggest missing or displaced controls. |
+| `edge_recall_4px` | Source edges with an output edge within 4 pixels, excluding OCR text regions | Low values suggest missing or displaced controls; `geometry.regions` locates weak areas. |
 | `edge_precision_4px` | Output edges with a source edge within 4 pixels | Low values suggest invented or duplicated shapes. |
 | `blurred_color_error` | Mean RGB difference after a 3-pixel blur, divided by 255 | Detects large missing surfaces while allowing small decorative changes. |
-| `text.recall` | Whether independently OCRing the rendered SVG recovers the recognized input lines nearby | Detects missing or unreadable labels; low-confidence text missed by input OCR requires ground truth. |
+| `text.recall` | Whether OCR of the rendered SVG recovers text in the reconstructed scene | Detects drawing errors, but can pass when the source OCR was wrong. |
+| `source_text.recall` | Whether rendered OCR recovers a separate, high-confidence OCR pass over the input | Detects transcription errors and omitted labels without trusting the scene's text; check `missing` for details. |
 | `ground_truth` | Known labels and control boxes in an optional manifest | Detects omissions that visual comparison and input OCR may both miss. |
 
 These are diagnostics, not a claim that one number captures correctness.
 Current warning thresholds are deliberately simple starting points. Inspect
 the individual missed elements and the rendered SVG before adjusting them.
 Text positions and font metrics can vary without invalidating the result.
+The separate OCR pass still cannot prove that both readers did not make the
+same mistake; a manually checked manifest is stronger evidence.
 
 Create two deterministic Windows-style fixtures and compare them with known
 element boxes and text. The manifest comes from the fixture specification,
