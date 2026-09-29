@@ -205,6 +205,39 @@ def _radio_from_pixels(image: np.ndarray, box) -> tuple[tuple[int,int,int,int], 
     return tuple(map(int, (left+x0, top+y0, diameter_x, diameter_y))), selected, color
 
 
+def _close_icon(image: np.ndarray) -> Node | None:
+    """Find a small diagonal X in the upper-right title-bar corner."""
+    height, width = image.shape[:2]
+    if width < 100 or height < 60:
+        return None
+    left, top = width-50, 4
+    patch = image[top:min(height//4, 36), left:width-4]
+    # Keep this restricted to dark ink on a light title bar, away from the
+    # window frame; other small header glyphs should remain untouched.
+    if patch.size == 0 or np.median(patch.reshape(-1, 3)) < 225:
+        return None
+    ink = np.max(patch, axis=2) < 160
+    labels, count = ndimage.label(ink, structure=np.ones((3, 3), dtype=int))
+    for label, region in enumerate(ndimage.find_objects(labels), start=1):
+        if region is None:
+            continue
+        ys, xs = region
+        w, h = xs.stop-xs.start, ys.stop-ys.start
+        if not (7 <= w <= 18 and 7 <= h <= 18 and .8 <= w/h <= 1.25):
+            continue
+        mask = labels[region] == label
+        yy, xx = np.nonzero(mask)
+        forward = np.abs(xx*(h-1) - yy*(w-1)) <= max(w,h)
+        backward = np.abs((w-1-xx)*(h-1) - yy*(w-1)) <= max(w,h)
+        if (forward.mean() < .38 or backward.mean() < .38 or
+                (forward | backward).mean() < .9 or
+                not all(mask[y, x] for y, x in ((0,0),(0,w-1),(h-1,0),(h-1,w-1)))):
+            continue
+        color = _hex(np.median(patch[region][mask], axis=0))
+        return Node("close-icon", (left+xs.start, top+ys.start, w, h), color)
+    return None
+
+
 def _structure(image: np.ndarray) -> list[Node]:
     """Recover broad white header surfaces and long pale panel dividers."""
     height, width = image.shape[:2]
@@ -225,6 +258,9 @@ def _structure(image: np.ndarray) -> list[Node]:
             start, end = int(top_run[0]), int(top_run[-1])+1
             color = _hex(np.median(image[start:end, 2:width-2].reshape(-1,3), axis=0))
             nodes.append(Node("rect", (1,start,width-2,end-start), color))
+    close = _close_icon(image)
+    if close:
+        nodes.append(close)
     from_y = max(end, 2)
     if height-from_y < 40:
         return nodes
