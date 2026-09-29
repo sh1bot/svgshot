@@ -15,6 +15,33 @@ from svgshot.validate import compare, ground_truth
 
 
 class PipelineTest(unittest.TestCase):
+    def test_radio_state_and_white_panel_structure(self):
+        image = Image.new("RGB", (420, 270), "#f0f0f0")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((1, 1, 418, 59), fill="white")
+        draw.rectangle((109, 60, 110, 268), fill="white")
+        draw.line((111, 227, 418, 227), fill="white")
+        font = ImageFont.truetype("DejaVuSans.ttf", 12)
+        for y, label, selected in ((95, "Publisher", False),
+                                   (142, "Path", True),
+                                   (189, "File hash", False)):
+            draw.ellipse((130, y, 142, y+12), fill="white", outline="#555555")
+            if selected:
+                draw.ellipse((134, y+4, 138, y+8), fill="#555555")
+            draw.text((151, y-1), label, font=font, fill="#222222")
+        scene = reconstruct(image, Options())
+        nodes = list(flatten(scene))
+        radios = [n for n in nodes if n.kind in ("radio", "radio-selected")]
+        self.assertEqual([n.kind for n in sorted(radios, key=lambda n:n.box[1])],
+                         ["radio", "radio-selected", "radio"])
+        self.assertEqual([n.box for n in radios],
+                         [(130,95,13,13), (130,142,13,13), (130,189,13,13)])
+        self.assertIn((1,1,418,59), [n.box for n in nodes if n.kind == "rect"])
+        self.assertIn((109,60,2,208), [n.box for n in nodes if n.kind == "line"])
+        self.assertIn((109,227,310,1), [n.box for n in nodes if n.kind == "line"])
+        svg = ElementTree.fromstring(to_svg(scene))
+        self.assertEqual(sum(n.tag.endswith("circle") for n in svg.iter()), 4)
+
     def test_framed_selection_and_disabled_button(self):
         image = Image.new("RGB", (360, 210), "#f0f0f0")
         draw = ImageDraw.Draw(image)
