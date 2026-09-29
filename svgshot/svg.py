@@ -127,6 +127,10 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             surface = node.background or surface
         elif kind == "line":
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')
+        elif kind == "close-icon":
+            parts.append(f'<path data-kind="close-icon" d="M{x} {y} L{x+w-1} {y+h-1} '
+                         f'M{x+w-1} {y} L{x} {y+h-1}" fill="none" '
+                         f'stroke="{paint}" stroke-width="1" stroke-linecap="square"/>')
         elif kind == "raster":
             parts.append(f'<image x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'xlink:href="data:image/png;base64,{node.image_data}"/>')
