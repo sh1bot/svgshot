@@ -108,9 +108,13 @@ def merge_uia(scene, image, snapshot):
     names are not painted as text. The original UIA tree is retained unchanged.
     """
     items = list(visible_items(snapshot["root"], snapshot))
+    chrome = {id(child) for item in items if kind(item) == "titlebar"
+              for child in walk(item) if child is not item}
     ocr = [n for n in flatten(scene) if n.kind == "text"]
-    suppressed = set()
+    chrome_boxes = [local_box(n["bounds"], snapshot) for n in items if id(n) in chrome]
+    suppressed = {id(n) for n in ocr if any(contains(b, n.box) for b in chrome_boxes)}
     controls, text_nodes = [], []
+    native_caption_buttons = []
     emitted = set()
     passwords = [local_box(n["bounds"], snapshot) for n in items if n.get("password")]
 
@@ -132,7 +136,8 @@ def merge_uia(scene, image, snapshot):
                 width = min(max(1, w-8), max(8, round(len(text)*height*.52)))
                 ink = (x+(w-width)//2, y+(h-height)//2, width, height)
             else:
-                ink = (x, y+(h-height)//2, max(1, w), height)
+                width = min(max(1, w), max(8, round(len(text)*height*.52)))
+                ink = (x, y+(h-height)//2, width, height)
         signature = (text, ink)
         if signature in emitted:
             return
@@ -146,8 +151,10 @@ def merge_uia(scene, image, snapshot):
     for item in items:
         box = local_box(item["bounds"], snapshot)
         role = kind(item)
-        if item.get("password"):
+        if item.get("password") or id(item) in chrome:
             continue
+        if role == "button" and item.get("class_name") == "Button" and item.get("name"):
+            native_caption_buttons.append(box)
         if role in {"button", "splitbutton", "edit", "combobox", "list", "tree", "datagrid", "table", "checkbox", "radiobutton", "tabitem"}:
             x, y, w, h = box
             shape = {"button": "outlined-button", "splitbutton": "outlined-button", "edit": "outline",
@@ -176,7 +183,10 @@ def merge_uia(scene, image, snapshot):
         if role == "titlebar" and snapshot["root"].get("name"):
             x, y, w, h = box
             if w > 100:
-                emit(snapshot["root"]["name"], (x+28, y+3, max(1, w-140), max(1, h-6)), item)
+                emit(snapshot["root"]["name"], (x+8, y+3, max(1, w-140), max(1, h-6)), item)
+                # Window chrome glyphs sometimes produce stray OCR characters.
+                # The title is already known exactly; glyphs stay vector artwork.
+                suppressed.update(id(n) for n in ocr if contains(box, n.box))
         if role in CAPTIONS and name:
             children = [n for n in walk(item) if n is not item and kind(n) == "text" and not n.get("offscreen")]
             if any(normalize(n.get("name", "")) == normalize(name) for n in children):
@@ -201,6 +211,10 @@ def merge_uia(scene, image, snapshot):
     def prune(node):
         retained = []
         for child in node.children:
+            if child.kind == "header-icon" and any(contains(b, child.box) for b in native_caption_buttons):
+                # This detector fits a large window illustration; it can falsely
+                # fit a native button's rectangular border and caption strokes.
+                continue
             if id(child) in suppressed:
                 continue
             if child.kind == "text" and any(overlap(child.box, b) for b in passwords):
@@ -280,7 +294,7 @@ def semantic_svg(scene, snapshot, font_family="auto"):
             # Exact original role/properties remain in data attributes + metadata.
             parts.append(f'<g id="capture-node-{serial}" role="group" aria-label="{escape(label, quote=True)}" '
                          f'data-uia-id="{escape(item.get("id", ""), quote=True)}" data-uia-role="{kind(item)}">')
-            parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="transparent" aria-hidden="true"/>')
+            parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#000000" fill-opacity="0" aria-hidden="true"/>')
             # UIA text ranges may carry document content absent from Name/Value.
             if not item.get("password"):
                 for line in item.get("text_ranges", []):

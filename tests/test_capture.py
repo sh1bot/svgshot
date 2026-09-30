@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from PIL import Image
+from PIL import Image, ImageChops
+from svgshot.svg import to_svg
+from svgshot.validate import render
 
 from svgshot.capture import main, local_box, merge_uia, semantic_svg, accessible_html
 from svgshot.model import Node, flatten
@@ -60,6 +62,30 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(any('Not visible' in n for n in labels))
         self.assertTrue(any('Window <&>' in label for label in labels))
         self.assertIn('Captured interface information', accessible_html(svg, s))
+
+    def test_accessibility_overlay_preserves_visual_pixels(self):
+        s = snapshot()
+        scene = Node('root', (0, 0, 300, 180), color='#ffffff', children=[
+            Node('rect', (20, 30, 60, 20), color='#0078d7'),
+            Node('text', (100, 80, 90, 14), text='Visible text'),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            a, b = d/'visual.svg', d/'semantic.svg'
+            a.write_text(to_svg(scene))
+            b.write_text(semantic_svg(scene, s))
+            self.assertIsNone(ImageChops.difference(render(str(a), 300), render(str(b), 300)).getbbox())
+
+    def test_titlebar_button_names_are_not_visible_captions(self):
+        s = snapshot()
+        titlebar = element(50037, '', [100, 200, 300, 25])
+        titlebar['children'] = [element(50000, 'Minimize', [350, 200, 25, 25])]
+        s['root']['children'].append(titlebar)
+        scene = merge_uia(Node('root', (0, 0, 300, 180), color='#ffffff'), Image.new('RGB', (300, 180)), s)
+        texts = [n.text for n in flatten(scene) if n.kind == 'text']
+        self.assertNotIn('Minimize', texts)
+        self.assertIn('Window <&>', texts)
+        self.assertIn('Minimize', semantic_svg(scene, s))
 
     def test_replay_cli_and_dimension_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
