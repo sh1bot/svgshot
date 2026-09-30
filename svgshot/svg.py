@@ -75,7 +75,7 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
              f'viewBox="0 0 {width} {height}" role="img">',
              f'<rect width="{width}" height="{height}" fill="{root.color}"/>']
 
-    filled = [node for node in flatten(root) if node.kind in ("rect", "button") or
+    filled = [node for node in flatten(root) if node.kind in ("rect", "button", "gradient-title") or
               (node.kind == "outlined-button" and node.background)]
 
     def surface_at(node: Node, inherited: str) -> str:
@@ -93,14 +93,14 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         x, y, w, h = node.box
         kind = node.kind
         paint = node.color
-        grouped = kind in ("button", "outlined-button", "radio", "radio-selected",
+        grouped = kind in ("button", "outlined-button", "beveled-button", "radio", "radio-selected",
                            "checkbox", "checkbox-selected", "dropdown", "radio-group")
         if grouped:
             parts.append(f'<g data-kind="{kind}">')
         if kind == "text":
             paint = _contrast(paint, surface_at(node, surface))
             size, baseline = text_layout(node, font_family)
-            weight = ' font-weight="600"' if size >= 14.5 and len(node.text) < 30 else ""
+            weight = ' font-weight="600"' if 14.5 <= size < 22 and len(node.text) < 30 else ""
             parts.append(f'<text x="{x}" y="{baseline:g}" fill="{paint}" '
                          f'font-family="{escape(resolved_family(font_family), quote=True)},sans-serif" font-size="{size:g}"'
                          f' textLength="{w}" lengthAdjust="spacingAndGlyphs"{weight}>'
@@ -119,6 +119,19 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         elif kind in ("rect", "button"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'rx="{min(4, h/6):g}" fill="{paint}"/>')
+            surface = paint
+        elif kind == "beveled-button":
+            parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')
+            parts.append(f'<path d="M{x+w-2} {y+1} V{y+h-2} H{x+1}" '
+                         f'fill="none" stroke="#202020" stroke-width="4"/>')
+            parts.append(f'<path d="M{x+2} {y+h-5} V{y+2} H{x+w-5}" '
+                         f'fill="none" stroke="#f4f4f4" stroke-width="3"/>')
+            parts.append(f'<path d="M{x+5} {y+h-8} V{y+6} H{x+w-8}" '
+                         f'fill="none" stroke="#969696" stroke-width="1.5"/>')
+            if any(child.text == "OK" for child in node.children):
+                parts.append(f'<rect x="{x+10}" y="{y+10}" width="{max(0,w-23)}" '
+                             f'height="{max(0,h-23)}" fill="none" stroke="#555555" '
+                             f'stroke-width="1" stroke-dasharray="2 3"/>')
             surface = paint
         elif kind in ("outline", "outlined-button", "checkbox", "checkbox-selected"):
             stroke = paint if kind == "outline" else _contrast(paint, surface, 3)
@@ -151,6 +164,10 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         elif kind == "close-dot":
             parts.append(f'<circle data-kind="close-dot" cx="{x+w/2:g}" cy="{y+h/2:g}" '
                          f'r="{min(w,h)/2:g}" fill="{paint}"/>')
+        elif kind == "gradient-title":
+            parts.append(f'<image data-kind="gradient-title" x="{x}" y="{y}" width="{w}" '
+                         f'height="{h}" preserveAspectRatio="none" '
+                         f'xlink:href="data:image/png;base64,{node.image_data}"/>')
         elif kind in ("raster", "fidelity-raster"):
             parts.append(f'<image x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'xlink:href="data:image/png;base64,{node.image_data}"/>')
@@ -165,7 +182,11 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
     for node in sorted(surfaces,key=lambda n:n.box[2]*n.box[3],reverse=True):
         draw(node, root.color)
     for node in root.children:
-        if node not in surfaces and node.kind not in ("text", "close-icon", "close-dot", "fidelity-raster"):
+        if node not in surfaces and node.kind not in ("text", "close-icon", "close-dot",
+                                                     "fidelity-raster", "gradient-title"):
+            draw(node, root.color)
+    for node in root.children:
+        if node.kind == "gradient-title":
             draw(node, root.color)
     for node in root.children:
         if node.kind == "text":

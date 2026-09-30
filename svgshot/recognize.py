@@ -20,9 +20,9 @@ from .model import Node
 class Options:
     colors: int = 10
     min_area: int = 18
-    max_raster: int = 128
+    max_raster: int = 64
     raster_fallback: bool = True
-    fidelity_fallback: bool = True
+    fidelity_fallback: bool = False
     ocr: bool = True
     language: str = "eng"
     font_family: str = "auto"
@@ -171,6 +171,19 @@ def _raster(image: Image.Image, box) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _title_gradient(image: np.ndarray, box) -> str:
+    """One clean horizontal PNG strip, stretched across the entire title bar."""
+    x,y,w,h = box
+    # Sample below the caption and close control, retaining the source's
+    # horizontal gradient without embedding either control in the bitmap.
+    first,last = (2,5) if h < 45 else (h-10,h-5)
+    row = np.median(image[y+first:y+last,x:x+w],axis=0)
+    row = ndimage.gaussian_filter1d(row,4,axis=0).clip(0,255).astype(np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(row[None,:,:],"RGB").save(buffer,format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def _contains(parent: Node, child: Node, tolerance=3) -> bool:
     x, y, w, h = parent.box
     a, b, c, d = child.box
@@ -276,8 +289,11 @@ def _blue_window_surfaces(image: np.ndarray) -> list[Node]:
     for x,y,w,h in _blue_title_bars(image):
         if blue[y:y+h,x:x+w].mean() < .85:
             continue
-        title_color = np.median(image[y:y+h,x:x+w].reshape(-1,3),axis=0)
-        surfaces.append(Node("rect",(x,y,w,h),_hex(title_color)))
+        first,last = (2,5) if h < 45 else (h-10,h-5)
+        title_color = _hex(np.median(image[y+first:y+last,x:x+w]
+                                     .reshape(-1,3),axis=0))
+        surfaces.append(Node("gradient-title",(x,y,w,h),title_color,
+                             image_data=_title_gradient(image,(x,y,w,h))))
         left,right = max(0,x-3),min(width,x+w+3)
         start = y+h+40
         if start >= height-20:
@@ -510,6 +526,56 @@ def _footer_buttons(image: np.ndarray, source: Image.Image, language: str) -> tu
     return controls, labels
 
 
+def _large_beveled_buttons(image: np.ndarray, source: Image.Image,
+                           language: str) -> list[Node]:
+    """Recover wide, raised buttons from their dark bottom and right rails."""
+    height,width = image.shape[:2]
+    gray = image.astype(float) @ np.array([.2126,.7152,.0722])
+    buttons = []
+    for y in range(max(25,int(height*.65)),height-20):
+        labels,_ = ndimage.label(gray[y] < 175)
+        for region in ndimage.find_objects(labels):
+            if region is None:
+                continue
+            x,right = region[0].start,region[0].stop
+            bw = right-x
+            if not (max(200,int(width*.16)) <= bw <= width*.45):
+                continue
+            if any(abs(x-n.box[0]) < 8 and abs(y-(n.box[1]+n.box[3])) < 12
+                   for n in buttons):
+                continue
+            rail_x = right-4
+            top = y
+            while top > max(1,y-130) and gray[top-1,rail_x] < 175:
+                top -= 1
+            bottom = y+1
+            while bottom < min(height,y+12) and gray[bottom,rail_x] < 175:
+                bottom += 1
+            bh = bottom-top
+            if not (50 <= bh <= 120 and top >= height*.6):
+                continue
+            inside = np.median(gray[top+12:bottom-12,x+20:right-20])
+            upper = np.median(gray[top+3:top+8,x+20:right-20])
+            rail = np.median(gray[top+12:bottom-12,rail_x])
+            if not (inside > 170 and upper > inside+12 and rail < inside-45):
+                continue
+            inset = (x+25,top+15,right-25,bottom-18)
+            a,b,c,d = inset
+            labels = [n for n in _ocr(source.crop(inset),language,psm=7)
+                      if n.confidence > .65 and n.text.isalpha()]
+            if len(labels) != 1:
+                continue
+            label = labels[0]
+            lx,ly,lw,lh = label.box
+            label.box = (a+lx,b+ly,lw,lh)
+            label.color = _hex(_pixel_color(image,label.box))
+            color = _hex(np.median(image[top+12:bottom-12,x+20:right-20]
+                                    .reshape(-1,3),axis=0))
+            buttons.append(Node("beveled-button",(x,top,bw,bh),color,
+                                confidence=.85,children=[label]))
+    return buttons
+
+
 def _tabs(image: np.ndarray, source: Image.Image, language: str) -> tuple[list[Node], list[Node]]:
     """Find the active white tab and its neighboring inactive tab."""
     height, width = image.shape[:2]
@@ -643,6 +709,26 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                     alternate.box[2] < overlaps[0].box[2]*1.6):
                 texts.remove(overlaps[0])
                 texts.append(alternate)
+        # Sparse full-image OCR can miss short white captions on small blue
+        # bars. Read the left end of each bar separately, away from its X.
+        for bx,by,bw,bh in _blue_title_bars(pixels):
+            if bh >= 45 or any(t.box[0] < bx+150 and
+                    by-4 <= t.box[1] <= by+bh and t.box[0]+t.box[2] > bx
+                    for t in texts):
+                continue
+            crop = rgb_image.crop((bx+4,by,bx+min(bw-50,190),by+bh))
+            labels = _ocr(crop,options.language,psm=7)
+            if not labels or labels[0].confidence < .58:
+                continue
+            label = labels[0]
+            word = label.text.split()[0].strip("|—-.,")
+            if not word or not any(ch.isalpha() for ch in word):
+                continue
+            lx,ly,lw,lh = label.box
+            text_height = min(lh,round(bh*.66))
+            texts.append(Node("text",(bx+4+lx,max(by+4,by+ly),
+                                       min(lw,max(20,round(text_height*.57*len(word)))),text_height),
+                              "#ffffff",text=word,confidence=label.confidence))
         footer, footer_labels = _footer_buttons(pixels, rgb_image, options.language)
         for label in footer_labels:
             texts = [t for t in texts if not (
@@ -660,7 +746,13 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
         footer, tabs = [], []
     checkboxes = _checkboxes(pixels, texts)
     dropdowns = _dropdowns(pixels, texts)
-    controls = checkboxes + dropdowns + footer + tabs
+    broad_buttons = _large_beveled_buttons(pixels,rgb_image,options.language) if options.ocr else []
+    for button in broad_buttons:
+        bx,by,bw,bh = button.box
+        texts = [t for t in texts if not (
+            max(bx,t.box[0]) < min(bx+bw,t.box[0]+t.box[2]) and
+            max(by,t.box[1]) < min(by+bh,t.box[1]+t.box[3]))]
+    controls = checkboxes + dropdowns + footer + tabs + broad_buttons
     reserved = np.zeros((h, w), dtype=bool)
     for node in texts:
         x, y, tw, th = node.box
@@ -702,6 +794,10 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             if kind == "unknown":
                 if not options.raster_fallback or max(bw, bh) > options.max_raster or area < 35:
                     continue
+                crop = pixels[ys.start:ys.stop,xs.start:xs.stop].astype(np.int16)
+                base = np.median(crop.reshape(-1,3),axis=0)
+                if np.percentile(np.max(np.abs(crop-base),axis=2),95) < 75:
+                    continue
                 node = Node("raster", box, confidence=confidence, image_data=_raster(rgb_image, box))
             else:
                 # Quantization is only for segmentation: using the palette's
@@ -741,6 +837,45 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     candidates = [node for node in candidates if not (
         (node.kind == "outline" and node.box[2] > w*.7 and node.box[3] > h*.65) or
         any(_contains(control,node,3) or _contains(node,control,3) for control in controls))]
+    def overlaps_button(node):
+        x,y,cw,ch = node.box
+        for button in broad_buttons:
+            bx,by,bw,bh = button.box
+            intersection = max(0,min(x+cw,bx+bw)-max(x,bx))*max(0,min(y+ch,by+bh)-max(y,by))
+            if intersection > cw*ch*.35:
+                return True
+        return False
+    candidates = [node for node in candidates if not overlaps_button(node)]
+    title_bars = [n for n in structural if n.kind == "gradient-title"]
+    candidates = [node for node in candidates if not any(
+        bar.box[0]-3 <= node.box[0] and node.box[0]+node.box[2] <= bar.box[0]+bar.box[2]+3 and
+        ((bar.box[1]-25 <= node.box[1] <= bar.box[1]+bar.box[3]+30 and node.box[3] <= 32) or
+         (bar.box[1]-3 <= node.box[1] and
+          node.box[1]+node.box[3] <= bar.box[1]+bar.box[3]+3 and
+          node.box[2] >= bar.box[2]*.8) or
+         (node.kind == "raster" and bar.box[1] <= node.box[1] and
+          node.box[1]+node.box[3] <= bar.box[1]+bar.box[3] and
+          node.box[2] <= 75 and node.box[3] <= 75))
+        for bar in title_bars)]
+    # Faint watermark fragments inside an otherwise flat window body are not
+    # useful editable controls. Keep strong-contrast geometry and text.
+    body_surfaces = [n for n in structural if n.kind == "rect" and
+                     n.box[2] > w*.3 and n.box[3] > h*.15]
+    def faint_body_detail(node):
+        if node.kind not in ("rect","line","ring","circle") or node.box[2]*node.box[3] > 2000:
+            return False
+        for body in body_surfaces:
+            if not _contains(body,node,-20):
+                continue
+            color = np.array([int(node.color[i:i+2],16) for i in (1,3,5)])
+            base = np.array([int(body.color[i:i+2],16) for i in (1,3,5)])
+            if np.max(np.abs(color-base)) < 35 and not any(
+                abs((t.box[0]+t.box[2]/2)-(node.box[0]+node.box[2]/2)) < 45 and
+                abs((t.box[1]+t.box[3]/2)-(node.box[1]+node.box[3]/2)) < 35
+                for t in texts):
+                return True
+        return False
+    candidates = [node for node in candidates if not faint_body_detail(node)]
     candidates = [node for node in candidates if node.kind != "raster" or not any(
         other.kind in ("rect", "outline", "outlined-button") and
         other.box[2]*other.box[3] >= node.box[2]*node.box[3]*.55 and

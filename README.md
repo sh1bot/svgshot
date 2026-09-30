@@ -6,35 +6,52 @@ uses OCR for SVG `<text>`, color regions for panels and buttons, fits small
 circles and outlines, groups radio controls with their captions, and embeds
 unrecognized artwork as PNG islands. It looks for title bars and close controls
 at either end of a window, including windows inside a larger desktop image.
-It reduces gradients, shadows, antialiasing noise, and tiny color variants.
-Complex layouts, watermarks, and custom artwork may need substantial raster
-fallback; their SVGs are less editable.
+It reduces shadows, antialiasing noise, and tiny color variants. A recognized
+blue title gradient uses one narrow PNG strip stretched across the whole bar,
+with editable caption and close control above it. Faint watermark detail may
+be discarded. Complex layouts and custom artwork remain approximate.
 
-## Install
+## Run from a checkout
 
-Requires Python 3.10+, [Tesseract OCR](https://github.com/tesseract-ocr/tesseract)
-on `PATH`. [Inkscape](https://inkscape.org/) on `PATH` enables automatic visual
-fidelity repair and is required for a comparison report. Install the Python package:
+Requires Python 3.10+, [Tesseract OCR](https://tesseract-ocr.github.io/tessdoc/Installation.html)
+on `PATH`, and the Python packages Pillow, NumPy, and SciPy. Install
+[Inkscape](https://inkscape.org/release/) on `PATH` if you want `--report` or
+the optional `--source-overlays` mode. For example:
+
+| Platform | External dependencies |
+| --- | --- |
+| Debian/Ubuntu | `sudo apt install tesseract-ocr inkscape python3-venv` |
+| macOS with Homebrew | `brew install tesseract && brew install --cask inkscape` |
+| Windows | Install [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki) and [Inkscape](https://inkscape.org/release/), adding their executable folders to `PATH`; reopen the terminal. |
+
+From the repository root, set up a Python environment **once**:
 
 ```sh
-python -m pip install .
-svgshot screenshot.png screenshot.svg
+python -m venv .venv
+.venv/bin/python -m pip install Pillow numpy scipy
 ```
 
-On Windows, install Tesseract and add its executable directory to `PATH`.
-The SVG contains editable text and shapes. It can also contain embedded PNG
-regions for details the recognizer cannot confidently describe. With Inkscape
-available, the converter renders its first attempt and selectively retains
-source regions where color or edges differ substantially. Check
-`scene.fidelity_raster_coverage` in the report to see the fraction of the image
-covered by these regions. Use `--no-fidelity` for the unrepaired vector attempt,
-or `--no-raster` to omit all embedded PNG regions. `--no-ocr` disables text
-reconstruction.
+On Windows PowerShell, use `.\.venv\Scripts\python.exe` in place of
+`.venv/bin/python`. Then run the current source directly from the repository
+root; after `git pull`, repeat only this command:
 
 ```sh
-svgshot screenshot.png screenshot.svg --scene scene.json \
+.venv/bin/python -m svgshot.cli screenshot.png screenshot.svg
+```
+
+The SVG contains editable text and shapes, plus small embedded PNG details
+when needed. Broad source-image overlays are **off by default**.
+`--source-overlays` renders the initial SVG, compares blurred color in
+96-pixel tiles, then pastes source PNG crops over tiles with large differences.
+It can hide recognition mistakes or cut through controls, so inspect the
+underlying reconstruction first. The report records overlay area in
+`scene.fidelity_raster_coverage` (a legacy field name). `--no-raster` omits
+all PNG details; `--no-ocr` disables text reconstruction.
+
+```sh
+.venv/bin/python -m svgshot.cli screenshot.png screenshot.svg --scene scene.json \
   --diagnostic text-boxes.svg \
-  --report quality.json --strict
+  --report quality.json
 ```
 
 The CLI returns 0 on successful conversion, 1 on errors, and 2 with `--strict`
@@ -53,9 +70,9 @@ Provide `--config settings.json`, for example:
 {
   "colors": 12,
   "min_area": 18,
-  "max_raster": 128,
+  "max_raster": 64,
   "raster_fallback": true,
-  "fidelity_fallback": true,
+  "fidelity_fallback": false,
   "ocr": true,
   "language": "eng",
   "font_family": "auto"
@@ -85,8 +102,8 @@ changes. The report keeps several checks separate:
 | `text.recall` | Whether OCR of the rendered SVG recovers text in the reconstructed scene | Detects drawing errors, but can pass when the source OCR was wrong. |
 | `source_text.recall` | Whether rendered OCR recovers a separate, high-confidence OCR pass over the input | Detects transcription errors and omitted labels without trusting the scene's text; check `missing` for details. |
 | `ground_truth` | Known labels and control boxes in an optional manifest | Detects omissions that visual comparison and input OCR may both miss. |
-| `before_fidelity` | Initial color error and edge recall, plus selected repair coverage and region count | Shows how well the editable reconstruction worked before source crops masked mistakes. |
-| `scene.fidelity_raster_coverage` | Area covered by source PNG regions added by the fidelity pass | A high value means a visually faithful result with limited editability; over 25% adds a warning. |
+| `before_fidelity` | Initial color error and edge recall, plus selected overlay coverage and region count | Legacy field name; shows the initial reconstruction before source crops mask mistakes. Present only with `--source-overlays`. |
+| `scene.fidelity_raster_coverage` | Area covered by source PNG overlays | Legacy field name; a high value means limited editability. Over 25% adds a warning. |
 
 These are diagnostics, not a claim that one number captures correctness.
 Current warning thresholds are deliberately simple starting points. Inspect
@@ -121,10 +138,9 @@ manifests alongside generated fixtures for real-world coverage.
 - Input OCR can miss small or low-contrast text. The tool makes a local OCR
   pass over likely buttons, but a known-element manifest is needed to prove
   completeness.
-- Large photos and custom artwork are not reconstructed. Unknown regions can
-  stay embedded as raster PNGs; highly detailed screenshots can have large
-  fallback coverage. Use `--no-fidelity` and the initial quality measurements
-  to examine reconstruction failures separately.
+- Large photos and custom artwork are not reconstructed. Small unknown regions
+  may stay embedded as raster PNGs. The optional `--source-overlays` pass can cover
+  large areas; its report measures that coverage separately.
 - Close-control detection works at both ends of title bars, but its macOS
   coverage currently comes from synthetic tests; real macOS screenshots still
   need corpus validation.

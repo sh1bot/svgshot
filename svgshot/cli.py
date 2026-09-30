@@ -26,8 +26,10 @@ def main(argv=None) -> int:
     parser.add_argument("--strict", action="store_true", help="Exit nonzero if the report has warnings")
     parser.add_argument("--no-ocr", action="store_true", help="Disable text detection explicitly")
     parser.add_argument("--no-raster", action="store_true", help="Discard unrecognized small details")
+    parser.add_argument("--source-overlays", "--fidelity", dest="source_overlays", action="store_true",
+                        help="Opt in to source PNG overlays where the SVG differs visually")
     parser.add_argument("--no-fidelity", action="store_true",
-                        help="Disable measured raster repair of poor vector regions")
+                        help="Disable source PNG overlays (including config-enabled overlays)")
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
     parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
     args = parser.parse_args(argv)
@@ -47,6 +49,8 @@ def main(argv=None) -> int:
                 options.ocr = False
             if args.no_raster:
                 options.raster_fallback = False
+            if args.source_overlays:
+                options.fidelity_fallback = True
             if args.no_fidelity:
                 options.fidelity_fallback = False
             if args.lang:

@@ -10,7 +10,9 @@ from PIL import Image, ImageDraw, ImageFont
 from svgshot.diagnostic import make_diagnostic
 from svgshot.fixture import generate
 from svgshot.model import Node, flatten
-from svgshot.recognize import Options, _window_close_controls, reconstruct
+from svgshot.recognize import (Options, _blue_window_surfaces,
+                               _large_beveled_buttons, _window_close_controls,
+                               reconstruct)
 from svgshot.svg import to_svg
 from svgshot.validate import add_fidelity_regions, compare, ground_truth, render
 
@@ -119,6 +121,31 @@ class PipelineTest(unittest.TestCase):
             svg = Path(directory)/"repaired.svg"
             svg.write_text(to_svg(scene),encoding="utf-8")
             self.assertEqual(render(str(svg),288).getpixel((50,50)),(36,73,181))
+
+    def test_wide_buttons_and_single_title_gradient_stay_separate(self):
+        self.assertFalse(Options().fidelity_fallback)
+        image = Image.new("RGB",(700,500),"#cecece")
+        draw = ImageDraw.Draw(image)
+        for x in range(50,650):
+            t = (x-50)/600
+            draw.line((x,50,x,99),fill=(int(10+50*t),int(65+80*t),int(170+40*t)))
+        font = ImageFont.truetype("DejaVuSans.ttf",28)
+        for x,label in ((100,"OK"),(370,"Cancel")):
+            draw.rectangle((x,390,x+229,454),fill="#cecece")
+            draw.rectangle((x,390,x+225,397),fill="#f4f4f4")
+            draw.line((x+227,390,x+227,454),fill="#202020",width=4)
+            draw.line((x,452,x+229,452),fill="#202020",width=4)
+            draw.text((x+75,408),label,fill="black",font=font)
+        pixels = np.asarray(image)
+        bars = _blue_window_surfaces(pixels)
+        buttons = _large_beveled_buttons(pixels,image,"eng")
+        self.assertEqual(len([n for n in bars if n.kind == "gradient-title"]),1)
+        self.assertEqual([n.children[0].text for n in buttons],["OK","Cancel"])
+        scene = Node("window",(0,0,700,500),"#cecece",children=bars+buttons)
+        svg = to_svg(scene)
+        self.assertEqual(svg.count('data-kind="gradient-title"'),1)
+        self.assertEqual(svg.count('data-kind="beveled-button"'),2)
+        self.assertNotIn('data-kind="fidelity-raster"',svg)
 
     def test_dialog_tabs_checkbox_dropdown_and_footer(self):
         image = Image.new("RGB",(361,321),"#f0f0f0")
