@@ -12,6 +12,8 @@ from svgshot.fixture import generate
 from svgshot.model import Node, flatten
 from svgshot.recognize import (Options, _blue_window_surfaces,
                                _decorative_background, _large_beveled_buttons,
+                               _embedded_panels, _focused_controls, _disabled_buttons,
+                               _footer_surface,
                                _multicolor_marks, _window_close_controls,
                                _window_shell,
                                reconstruct)
@@ -21,6 +23,60 @@ from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
 
 
 class PipelineTest(unittest.TestCase):
+    def test_semantic_field_selection_and_footer(self):
+        image=Image.new("RGB",(400,206),"white")
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((1,144,398,204),fill="#f0f0f0")
+        draw.rectangle((64,100,383,122),outline="#0078d7")
+        draw.rectangle((70,103,128,117),fill="#0078d7")
+        pixels=np.asarray(image)
+        controls,_=_focused_controls(pixels,image,"eng",False)
+        footer=_footer_surface(pixels)
+        self.assertEqual([n.kind for n in controls],["input-field","text-selection"])
+        self.assertIsNotNone(footer)
+        scene=Node("window",(0,0,400,206),"#ffffff",children=[footer,*controls])
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"field.svg"
+            path.write_text(to_svg(scene),encoding="utf-8")
+            drawn=render(str(path),400)
+        baseline=semantic_scorecard(image,Image.new("RGB",image.size,"white"),
+                                    Node("window",(0,0,400,206),"#ffffff"),
+                                    {"edge_recall_4px":.5,"edge_precision_4px":1,
+                                     "blurred_color_error":.1},"eng",False)
+        improved=semantic_scorecard(image,drawn,scene,
+                                    {"edge_recall_4px":1,"edge_precision_4px":1,
+                                     "blurred_color_error":0},"eng",False)
+        self.assertEqual({f["kind"] for f in baseline["findings"]},
+                         {"input-field","text-selection","footer-panel"})
+        self.assertEqual(improved["findings"],[])
+
+    def test_semantic_list_pane_dividers_and_disabled_buttons(self):
+        image=Image.new("RGB",(600,440),"#f0f0f0")
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((1,150,141,167),fill="#0078d7")
+        draw.rectangle((150,220,400,350),fill="white",outline="#828790")
+        for x in (300,350):
+            draw.line((x,222,x,245),fill="#e5e5e5")
+        for y in (250,282):
+            draw.rectangle((450,y,550,y+24),fill="#cccccc",outline="#bfbfbf")
+        pixels=np.asarray(image)
+        panels=_embedded_panels(pixels)
+        buttons=_disabled_buttons(pixels)
+        controls,_=_focused_controls(pixels,image,"eng",False)
+        self.assertEqual(len(panels),1)
+        self.assertEqual(len(panels[0].children),2)
+        self.assertEqual(len(buttons),2)
+        self.assertEqual([n.kind for n in controls],["selected-row"])
+        scene=Node("window",(0,0,600,440),"#f0f0f0",children=[*panels,*buttons,*controls])
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"pane.svg"
+            path.write_text(to_svg(scene),encoding="utf-8")
+            drawn=render(str(path),600)
+        score=semantic_scorecard(image,drawn,scene,
+                                 {"edge_recall_4px":1,"edge_precision_4px":1,
+                                  "blurred_color_error":0},"eng",False)
+        self.assertFalse(score["findings"])
+
     def test_radio_state_and_white_panel_structure(self):
         image = Image.new("RGB", (420, 270), "#f0f0f0")
         draw = ImageDraw.Draw(image)

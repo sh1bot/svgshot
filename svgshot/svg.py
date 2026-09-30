@@ -76,7 +76,8 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
              f'<rect width="{width}" height="{height}" fill="{root.color}"/>']
 
     filled = [node for node in flatten(root) if node.kind in ("rect", "button", "gradient-title",
-                                                          "dialog-panel", "window-header") or
+                                                          "dialog-panel", "window-header", "selected-row",
+                                                          "text-selection") or
               (node.kind == "outlined-button" and node.background)]
 
     def surface_at(node: Node, inherited: str) -> str:
@@ -87,7 +88,7 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                    shape.box[1]+shape.box[3] >= y+h]
         if matches:
             shape = min(matches, key=lambda shape: shape.box[2]*shape.box[3])
-            return shape.background or shape.color
+            return shape.color if shape.kind in ("selected-row","text-selection") else shape.background or shape.color
         return inherited
 
     def draw(node: Node, surface: str):
@@ -116,8 +117,9 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                 parts.append(f'<path d="{data["wave_path"]}" fill="{data["wave_color"]}"/>')
             parts.append('</g>')
         elif kind == "text":
-            paint = _contrast(paint, surface_at(node, surface),
-                              3 if node.vector_data.get("role")=="link" else 4.4)
+            if node.vector_data.get("role") not in ("selected-text","disabled-text"):
+                paint = _contrast(paint, surface_at(node, surface),
+                                  3 if node.vector_data.get("role")=="link" else 4.4)
             size, baseline = text_layout(node, font_family)
             weight = ' font-weight="600"' if 14.5 <= size < 22 and len(node.text) < 30 else ""
             parts.append(f'<text x="{x}" y="{baseline:g}" fill="{paint}" '
@@ -141,10 +143,57 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'fill="#ffffff" stroke="#e3e3e3" stroke-width=".7"/></g>')
             surface = "#ffffff"
+        elif kind == "footer-panel":
+            parts.append(f'<rect data-kind="footer-panel" x="{x}" y="{y}" '
+                         f'width="{w}" height="{h}" fill="{paint}"/>')
+            surface=paint
         elif kind == "window-header":
             parts.append(f'<rect data-kind="window-header" x="{x}" y="{y}" '
                          f'width="{w}" height="{h}" fill="{paint}"/>')
             surface = paint
+        elif kind == "content-panel":
+            parts.append(f'<rect data-kind="content-panel" x="{x+.5:g}" y="{y+.5:g}" '
+                         f'width="{w-1}" height="{h-1}" fill="{paint}" '
+                         f'stroke="{node.background or "#999999"}" stroke-width="1"/>')
+            surface=paint
+        elif kind == "header-icon":
+            parts.append(f'<g data-kind="header-icon" transform="translate({x} {y}) scale({w/40:g} {h/32:g})">')
+            if node.vector_data.get("style")=="window-stack":
+                for ox,oy in ((1,7),(5,4),(9,1)):
+                    parts.append(f'<path d="M{ox} {oy} h27 l-5 20 h-27 Z" fill="#ffffff" '
+                                 'stroke="#54a8db" stroke-width="1.6"/>')
+                parts.append('<path d="M13 5 h18 l-3 12 H10 Z" fill="#d9effb" '
+                             'stroke="#167fc3" stroke-width="1.5"/>')
+            else:
+                parts.append('<rect x="1" y="1" width="38" height="30" fill="#fafafa" '
+                             'stroke="#6b747c" stroke-width="1.6"/>')
+                parts.append('<rect x="2" y="2" width="36" height="4" fill="#34556b"/>')
+                parts.append('<path d="M20 7 V30 M4 11 H17 M4 14 H17 M4 17 H17 '
+                             'M23 11 H36 M23 14 H36 M23 17 H36" fill="none" '
+                             'stroke="#aeb5be" stroke-width=".8"/>')
+            parts.append('</g>')
+        elif kind == "title-icon":
+            parts.append(f'<g data-kind="title-icon" transform="translate({x} {y}) scale({w/18:g} {h/12:g})">')
+            for ox,oy in ((1,3),(4,2),(7,1)):
+                parts.append(f'<path d="M{ox} {oy} h10 l-2 8 h-10 Z" fill="#ffffff" '
+                             'stroke="#4ca5dc" stroke-width=".9"/>')
+            parts.append('</g>')
+        elif kind == "disabled-button":
+            parts.append(f'<rect data-kind="disabled-button" x="{x+.5:g}" y="{y+.5:g}" '
+                         f'width="{w-1}" height="{h-1}" fill="{paint}" '
+                         f'stroke="{node.background}" stroke-width="1"/>')
+            surface=paint
+        elif kind in ("selected-row","text-selection"):
+            parts.append(f'<rect data-kind="{kind}" x="{x}" y="{y}" '
+                         f'width="{w}" height="{h}" fill="{paint}"/>')
+            surface=paint
+        elif kind == "input-field":
+            parts.append(f'<rect data-kind="input-field" x="{x+.5:g}" y="{y+.5:g}" '
+                         f'width="{w-1}" height="{h-1}" fill="{node.background}" '
+                         f'stroke="{paint}" stroke-width="1"/>')
+            parts.append(f'<path d="M{x+w-14} {y+h/2-2:g} l4 4 4 -4" '
+                         'fill="none" stroke="#505050" stroke-width="1"/>')
+            surface=node.background
         elif kind in ("rect", "button"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'rx="{min(4, h/6):g}" fill="{paint}"/>')
@@ -183,7 +232,7 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                          f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
             if kind == "tab-active":
                 parts.append(f'<path d="M{x+1} {y+h-1} h{w-2}" stroke="#ffffff"/>')
-        elif kind in ("line", "input-underline"):
+        elif kind in ("line", "input-underline", "column-divider"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')
         elif kind == "close-icon":
             parts.append(f'<path data-kind="close-icon" d="M{x} {y} L{x+w-1} {y+h-1} '

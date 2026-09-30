@@ -254,6 +254,175 @@ def _contains_box(outer,inner) -> bool:
     return x<=a and y<=b and a+c<=x+w and b+d<=y+h
 
 
+def _embedded_panels(image: np.ndarray) -> list[Node]:
+    """Large white bounded content panes inside otherwise gray windows."""
+    h,w = image.shape[:2]
+    white = np.min(image,axis=2)>=249
+    labels,_ = ndimage.label(white)
+    result = []
+    for label,region in enumerate(ndimage.find_objects(labels),1):
+        if region is None:
+            continue
+        ys,xs = region
+        pw,ph = xs.stop-xs.start,ys.stop-ys.start
+        if (w*.25<pw<w*.8 and h*.12<ph<h*.55 and
+                xs.start>20 and ys.start>h*.25 and
+                xs.stop<w-20 and ys.stop<h-20 and
+                np.mean(labels[region]==label)>.9 and
+                np.mean(image[ys.start-1,xs.start:xs.stop])<245):
+            panel=Node("content-panel",(xs.start-1,ys.start-1,pw+2,ph+2),
+                       "#ffffff",background=_hex(image[ys.start-1,xs.start]),
+                       confidence=.92)
+            for x in range(xs.start+15,xs.stop-15):
+                column=image[ys.start+1:ys.start+25,x].astype(int)
+                below=image[ys.start+28,x]
+                if (len(column)==24 and 215<=np.median(column)<=240 and
+                        np.mean(np.max(column,axis=1)-np.min(column,axis=1)<5)>.95 and
+                        np.min(below)>248):
+                    if not panel.children or x-panel.children[-1].box[0]>3:
+                        panel.children.append(Node("column-divider",(x,ys.start+1,1,24),
+                                                   _hex(np.median(column,axis=0))))
+            result.append(panel)
+    return result
+
+
+def _footer_surface(image: np.ndarray) -> Node | None:
+    h,w=image.shape[:2]
+    if h<150 or w<250:
+        return None
+    for y in range(int(h*.55),h-30):
+        row=image[y,5:w-5]
+        prev=image[y-1,5:w-5]
+        color=np.median(row,axis=0)
+        if (220<=np.min(color)<=248 and np.ptp(color)<5 and
+                np.mean(np.max(np.abs(row.astype(int)-color),axis=1)<5)>.95 and
+                np.mean(np.min(prev,axis=1)>=249)>.95 and
+                np.mean(np.max(np.abs(image[h-5,5:w-5].astype(int)-color),axis=1)<5)>.95):
+            return Node("footer-panel",(1,y,w-2,h-y-1),_hex(color),confidence=.95)
+    return None
+
+
+def _header_illustration(image: np.ndarray) -> Node | None:
+    """Compact illustration at the left of a white dialog's body heading."""
+    h,w=image.shape[:2]
+    if w<250 or h<150:
+        return None
+    roi=image[35:min(95,h-40),5:min(60,w//4)]
+    mask=np.min(roi,axis=2)<245
+    yy,xx=np.where(mask)
+    if not len(xx):
+        return None
+    x,y,bw,bh=(int(xx.min()+5),int(yy.min()+35),
+               int(xx.max()-xx.min()+1),int(yy.max()-yy.min()+1))
+    if not (8<=x<=25 and 40<=y<=70 and 20<=bw<=50 and 18<=bh<=45):
+        return None
+    crop=image[y:y+bh,x:x+bw].astype(int)
+    blue=((crop[:,:,2]-crop[:,:,0]>40)&(crop[:,:,2]-crop[:,:,1]>10)).mean()
+    style="window-stack" if blue>.14 else "document"
+    return Node("header-icon",(x,y,bw,bh),confidence=.68,
+                vector_data={"style":style})
+
+
+def _titlebar_icon(image: np.ndarray) -> Node | None:
+    if image.shape[1]<250 or image.shape[0]<150:
+        return None
+    crop=image[5:26,5:29].astype(int)
+    colored=(crop[:,:,2]-crop[:,:,0]>45)&(crop[:,:,2]-crop[:,:,1]>10)
+    yy,xx=np.where(colored)
+    neutral=((np.max(crop,axis=2)-np.min(crop,axis=2)<35)&
+             (np.mean(crop,axis=2)<110))
+    if colored.mean()<.18 or neutral.mean()>.012:
+        return None
+    x,y,w,h=(int(xx.min()+5),int(yy.min()+5),int(xx.max()-xx.min()+1),
+             int(yy.max()-yy.min()+1))
+    if not (7<=x<=18 and 7<=y<=17 and 9<=w<=22 and 7<=h<=17):
+        return None
+    return Node("title-icon",(x-1,y-1,w+2,h+2),confidence=.7)
+
+
+def _blue_rectangles(image: np.ndarray) -> list[tuple[int,int,int,int]]:
+    rgb = image.astype(int)
+    blue = ((rgb[:,:,2]-rgb[:,:,0]>90)&(rgb[:,:,2]-rgb[:,:,1]>35)&
+            (rgb[:,:,1]>60))
+    merged = ndimage.binary_closing(blue,structure=np.ones((3,5)),border_value=0)
+    labels,_ = ndimage.label(merged)
+    boxes = []
+    for region in ndimage.find_objects(labels):
+        if region is not None:
+            ys,xs=region
+            boxes.append((xs.start,ys.start,xs.stop-xs.start,ys.stop-ys.start))
+    return boxes
+
+
+def _focused_controls(image: np.ndarray, source: Image.Image,
+                      language: str, ocr: bool) -> tuple[list[Node],list[Node]]:
+    h,w = image.shape[:2]
+    controls,texts = [],[]
+    for x,y,bw,bh in _blue_rectangles(image):
+        if (w*.55<=bw<=w*.9 and 18<=bh<=32 and
+                30<y<h*.75 and x>35):
+            controls.append(Node("input-field",(x,y,bw,bh),"#0078d7",
+                                 background="#ffffff",confidence=.93))
+            # A selected value is a smaller blue rectangle within the field.
+            for left in range(x+3,min(x+12,x+bw-40)):
+                runs = image[y+3:y+bh-3,left]
+                if len(runs)<6 or np.mean((runs[:,2].astype(int)-runs[:,0].astype(int)>80))<.6:
+                    continue
+                start = left
+                end = start
+                while end<x+bw-40 and (
+                    int(image[y+3,end,2])-int(image[y+3,end,0])>80):
+                    end += 1
+                if end-start<20:
+                    continue
+                controls.append(Node("text-selection",(start,y+3,end-start,bh-8),
+                                     "#0078d7",confidence=.95))
+                if ocr:
+                    crop = source.crop((start,y+3,end,y+bh-4))
+                    for label in _ocr(crop,language,psm=7):
+                        if label.confidence>.7:
+                            tx,ty,tw,th=label.box
+                            label.box=(start+tx,y+3+ty,tw,th)
+                            label.color="#ffffff"
+                            label.vector_data["role"]="selected-text"
+                            texts.append(label)
+                break
+        elif (w*.12<bw<w*.55 and 15<=bh<=30 and
+              x<=w*.05 and h*.1<y<h*.75):
+            box=(max(1,x-1),y,min(w-2,bw+1),bh)
+            controls.append(Node("selected-row",box,"#0078d7",confidence=.95))
+            if ocr:
+                left,top=box[0]+3,y+1
+                for label in _ocr(source.crop((left,top,box[0]+box[2]-2,y+bh-1)),
+                                  language,psm=7):
+                    if label.confidence>.7:
+                        tx,ty,tw,th=label.box
+                        label.box=(left+tx,top+ty,tw,th)
+                        label.color="#ffffff"
+                        texts.append(label)
+    return controls,texts
+
+
+def _disabled_buttons(image: np.ndarray) -> list[Node]:
+    h,w=image.shape[:2]
+    result=[]
+    for y in range(int(h*.35),int(h*.85)):
+        for x,right,color in _flat_runs(image[y],80,150):
+            if not (x>w*.55 and 175<=int(color[0])<=205 and
+                    np.max(color)-np.min(color)<5 and
+                    0<y+3<h and np.mean(image[y+2,x+3].astype(int))>=195 and
+                    np.mean(image[y+2,x+3].astype(int))<=215):
+                continue
+            if any(abs(n.box[0]-x)<3 and abs(n.box[1]-y)<30 for n in result):
+                continue
+            for bottom in range(y+19,min(y+31,h-1)):
+                if np.mean(np.all(image[bottom,x:right]==color,axis=1))>.98:
+                    result.append(Node("disabled-button",(x,y,right-x,bottom-y+1),
+                                       "#cccccc",background=_hex(color),confidence=.9))
+                    break
+    return result
+
+
 def _decorative_background(image: np.ndarray) -> Node | None:
     """Classify a smooth illustrated backdrop behind a centered white card."""
     h,w = image.shape[:2]
@@ -628,7 +797,8 @@ def _dropdowns(image: np.ndarray, texts: list[Node]) -> list[Node]:
     height, width = image.shape[:2]
     found = []
     for label in texts:
-        if not (7 <= label.box[3] <= 20 and 20 <= label.box[0] < width-100):
+        if not (7 <= label.box[3] <= 20 and 20 <= label.box[0] < width-100
+                and label.box[1] >= 30 and label.text not in ("Exception", "Type")):
             continue
         tx, ty, _, _ = label.box
         for y in range(max(1,ty-8),ty+1):
@@ -846,8 +1016,20 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     root = Node("window", (0, 0, w, h), _hex(background))
     decorative = _decorative_background(pixels)
     marks = _multicolor_marks(pixels)
-    structural = _structure(pixels)
+    disabled = _disabled_buttons(pixels)
+    footer_surface = _footer_surface(pixels)
+    illustration = _header_illustration(pixels)
+    title_icon = _titlebar_icon(pixels)
+    structural = _structure(pixels)+_embedded_panels(pixels)+disabled
+    if illustration:
+        structural.append(illustration)
+    if title_icon:
+        structural.append(title_icon)
+    if footer_surface:
+        structural.insert(0,footer_surface)
     texts = _ocr(rgb_image, options.language) if options.ocr else []
+    focused,focused_text = _focused_controls(pixels,rgb_image,options.language,options.ocr)
+    structural.extend(focused)
     shell,title = _window_shell(pixels,rgb_image,options.language,options.ocr)
     if shell:
         structural = [n for n in structural if not any(
@@ -931,6 +1113,24 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             texts.extend(tab_labels)
     else:
         footer, tabs = [], []
+    for label in focused_text:
+        texts = [t for t in texts if _iou_boxes(t.box,label.box)<.2]
+        texts.append(label)
+    # Sparse OCR occasionally loses the first word of a short field label.
+    for node in texts:
+        if not (node.text.endswith(":") and 40<node.box[0]<w-100):
+            continue
+        x,y,tw,th=node.box
+        left,top=max(0,x-50),max(0,y-3)
+        candidates = _ocr(rgb_image.crop((left,top,min(w,x+tw+4),min(h,y+th+3))),
+                          options.language,psm=7)
+        if len(candidates)==1 and candidates[0].confidence>.8 and (
+                candidates[0].text.endswith(node.text) and
+                len(candidates[0].text)>len(node.text)+3):
+            better=candidates[0]
+            bx,by,bw,bh=better.box
+            node.text=better.text
+            node.box=(left+bx,top+by,bw,bh)
     # Blue links inside a focus rectangle can lose their first glyph to the
     # dotted border. A tight local crop restores the complete phrase without
     # letting the rectangle enter the OCR line.
@@ -973,11 +1173,14 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     for node in texts:
         x, y, tw, th = node.box
         reserved[max(0,y-2):min(h,y+th+3), max(0,x-2):min(w,x+tw+3)] = True
-        node.color = _hex(_pixel_color(pixels, node.box))
+        node.color = ("#ffffff" if node.vector_data.get("role")=="selected-text"
+                      else _hex(_pixel_color(pixels, node.box)))
         crop = pixels[y:y+th,x:x+tw].astype(np.int16)
         colored = (crop[:,:,2]-crop[:,:,0]>55)&(crop[:,:,2]-crop[:,:,1]>10)
         fraction = colored.mean() if colored.size else 0
-        if .02 < fraction < .45:
+        neutral_dark = ((np.max(crop,axis=2)-np.min(crop,axis=2)<35)&
+                        (np.mean(crop,axis=2)<110)).mean() if crop.size else 0
+        if .02 < fraction < .45 and neutral_dark < .015 and node.vector_data.get("role")!="selected-text":
             node.color = _hex(np.median(crop[colored],axis=0))
             node.vector_data["role"] = "link"
 
@@ -1143,6 +1346,12 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                    abs((t.box[1]+t.box[3]/2)-(node.box[1]+node.box[3]/2)) < 10 for t in texts):
                 node.kind = "checkbox"
     candidates = [n for n in candidates if id(n) not in consumed]
+    if illustration:
+        candidates=[n for n in candidates if not _contains(illustration,n,3)]
+    if title_icon:
+        candidates=[n for n in candidates if not _contains(title_icon,n,3)]
+    candidates = [n for n in candidates if not any(
+        _iou_boxes(n.box,button.box)>.6 for button in disabled)]
     if options.ocr:
         examined = 0
         for control in candidates:
@@ -1164,6 +1373,8 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                     texts.append(local)
     root.children = ([decorative] if decorative else []) + structural + candidates + marks + controls
     for text in texts:
+        if any(_contains(button,text,2) for button in disabled):
+            text.vector_data["role"]="disabled-text"
         parents = [n for n in candidates if n.kind in ("rect", "outline", "outlined-button") and
                    n.box[2] > text.box[2]+8 and _contains(n, text)]
         if parents:
@@ -1202,3 +1413,9 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
         bottom = max(n.box[1]+n.box[3] for n in all_nodes)
         root.children.append(Node("radio-group", (x,y,right-x,bottom-y), children=row))
     return root
+
+
+def _iou_boxes(a,b):
+    x,y,w,h=a; p,q,r,s=b
+    overlap=max(0,min(x+w,p+r)-max(x,p))*max(0,min(y+h,q+s)-max(y,q))
+    return overlap/(w*h+r*s-overlap) if overlap else 0.0

@@ -8,7 +8,10 @@ unrecognized artwork as PNG islands. It looks for title bars and close controls
 at either end of a window, including windows inside a larger desktop image.
 For some modern dialogs it also identifies an inset white card and its outer
 window title, a compact four-color mark, and a smooth illustrated backdrop.
-Those regions become named SVG surfaces, colored squares, gradients, and paths.
+It recognizes selected navigation rows, focused input fields with selected
+text, bounded list panes, disabled buttons, and footer surfaces. Those regions
+become named SVG shapes and editable text. Compact window and document icons
+in the title or body can become simple vector approximations.
 It reduces shadows, antialiasing noise, and tiny color variants. A recognized
 blue title gradient uses one narrow PNG strip stretched across the whole bar,
 with editable caption and close control above it. Faint watermark detail may
@@ -104,7 +107,7 @@ changes. The report keeps several checks separate:
 | `blurred_color_error` | Mean RGB difference after a 3-pixel blur, divided by 255 | Detects large missing surfaces while allowing small decorative changes. |
 | `text.recall` | Whether OCR of the rendered SVG recovers text in the reconstructed scene | Detects drawing errors, but can pass when the source OCR was wrong. |
 | `source_text.recall` | Whether rendered OCR recovers a separate, high-confidence OCR pass over the input | Detects transcription errors and omitted labels without trusting the scene's text; check `missing` for details. |
-| `scorecard.layout_regions` | Independently detected inset panel, outer window title, email field underline, and blue link ink | Checks explicit vector boundaries, title text, thin field rules, and link color. Each result has a box and score. |
+| `scorecard.layout_regions` | Independently detected panels, title, field rules and selections, navigation rows, list dividers, disabled buttons, footer surfaces, and blue link ink | Checks explicit vector boundaries, text, selection state, and color. Each result has a box and score. |
 | `scorecard.regions` | Independently detected compact multicolor marks and decorative backdrops | Checks that they remain vector objects and compares their visible colors and broad shape. |
 | `scorecard.local_text` | OCR of small source and output crops around each confident text label | Catches a lost first letter that whole-image OCR recall can overlook. Nearby controls can still confuse OCR. |
 | `scorecard.findings` | Actionable faults with `kind`, `box`, and message | Inspect these first. `passes` is false when any semantic finding remains; `score` combines geometry, text, layout, and imagery for ranking iterations. |
@@ -114,7 +117,8 @@ changes. The report keeps several checks separate:
 
 Run the converter with `--report quality.json`, then compare `scorecard.score`,
 `scorecard.passes`, and its localized `findings` across iterations. The overall
-score is useful for sorting candidates; treat a failing semantic region as a
+score includes blurred color error and edge precision as well as region checks.
+`passes` is false when any report warning remains. Treat a failing semantic region as a
 fault even when global color error is small. These are diagnostics, not a claim
 that one number captures correctness.
 Current warning thresholds are deliberately simple starting points. Inspect

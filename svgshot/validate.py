@@ -15,6 +15,8 @@ from scipy import ndimage
 
 from .model import Node, flatten
 from .recognize import (_ocr, _raster, _multicolor_marks, _input_underlines,
+                        _embedded_panels, _focused_controls, _disabled_buttons, _footer_surface,
+                        _header_illustration, _titlebar_icon,
                         _decorative_background, _white_card, _window_shell)
 from .svg import to_svg
 
@@ -286,6 +288,87 @@ def semantic_scorecard(source: Image.Image, rendered: Image.Image, scene: Node,
     findings = []
     regions = []
     layout = []
+    title_icon=_titlebar_icon(src)
+    if title_icon:
+        box=title_icon.box
+        vector=any(n.kind=="title-icon" and _iou(n.box,box)>.6
+                   for n in scene_nodes)
+        raster=any(n.kind in ("raster","fidelity-raster") and
+                   _iou(n.box,box)>.2 for n in scene_nodes)
+        score=float(vector and not raster)
+        regions.append({"kind":"title-icon","box":list(box),"score":score,
+                        "vector":bool(score)})
+        if not score:
+            findings.append({"kind":"title-icon","box":list(box),
+                             "message":"Small window icon is missing or raster-backed"})
+    icon=_header_illustration(src)
+    if icon:
+        box=icon.box
+        vector=any(n.kind=="header-icon" and _iou(n.box,box)>.7
+                   for n in scene_nodes)
+        raster=any(n.kind in ("raster","fidelity-raster") and
+                   _iou(n.box,box)>.08 for n in scene_nodes)
+        x,y,w,h=box
+        original=src[y:y+h,x:x+w].astype(float)
+        visible=dst[y:y+h,x:x+w].astype(float)
+        color_error=float(np.mean(np.abs(ndimage.gaussian_filter(original,(1,1,0))-
+                                         ndimage.gaussian_filter(visible,(1,1,0))))/255)
+        score=round(.6*int(vector and not raster)+.4*max(0,1-color_error/.22),3)
+        regions.append({"kind":"header-icon","box":list(box),"score":score,
+                        "vector":vector and not raster,
+                        "blurred_color_error":round(color_error,3)})
+        if not vector or raster or score<.68:
+            findings.append({"kind":"header-icon","box":list(box),
+                             "message":"Heading illustration is missing or raster-backed"})
+    source_controls,control_labels = _focused_controls(src,source,language,check_text)
+    output_controls,_ = _focused_controls(dst,rendered,language,False)
+    footer=_footer_surface(src)
+    for expected in _embedded_panels(src)+_disabled_buttons(src)+source_controls+([footer] if footer else []):
+        kind,box=expected.kind,expected.box
+        nodes = (_embedded_panels(dst) if kind=="content-panel" else
+                 _disabled_buttons(dst) if kind=="disabled-button" else
+                 [_footer_surface(dst)] if kind=="footer-panel" else output_controls)
+        nodes=[n for n in nodes if n is not None]
+        visible = any(n.kind==kind and _iou(n.box,box)>.75 for n in nodes)
+        vector = any(n.kind==kind and _iou(n.box,box)>.75 for n in scene_nodes)
+        score=.5*int(visible)+.5*int(vector)
+        entry={"kind":kind,"box":list(box),"score":score,
+               "vector":vector,"visible":visible}
+        if kind=="input-field" or kind=="selected-row":
+            labels=[label for label in control_labels if _iou(label.box,box)>0]
+            if labels:
+                label=labels[0]
+                retained=any(n.kind=="text" and n.text.casefold()==label.text.casefold() and
+                             _iou(n.box,label.box)>.45 for n in scene_nodes)
+                crop_box=box
+                if kind=="input-field":
+                    crop_box=next((n.box for n in source_controls if n.kind=="text-selection"
+                                   and _iou(n.box,box)>0),box)
+                cx,cy,cw,ch=crop_box
+                crop=rendered.crop((cx,cy,cx+cw,cy+ch))
+                observed=_ocr(crop,language,psm=7)
+                readable=any(difflib.SequenceMatcher(None,label.text.casefold(),
+                             n.text.casefold()).ratio()>.8 for n in observed)
+                entry.update({"source_text":label.text,"text_vector":retained,
+                              "text_readable":readable})
+                score=.3*int(visible)+.3*int(vector)+.4*int(retained and readable)
+                entry["score"]=round(score,3)
+        layout.append(entry)
+        if entry["score"]<.85:
+            findings.append({"kind":kind,"box":list(box),
+                             "message":f"{kind} is missing, displaced, or has unreadable text"})
+        if kind=="content-panel":
+            visible_dividers=[child for panel in nodes for child in panel.children]
+            for divider in expected.children:
+                present=any(_iou(divider.box,n.box)>.8 for n in scene_nodes
+                            if n.kind=="column-divider")
+                visible_line=any(_iou(divider.box,n.box)>.8 for n in visible_dividers)
+                value=.5*int(present)+.5*int(visible_line)
+                layout.append({"kind":"column-divider","box":list(divider.box),
+                               "score":value,"vector":present,"visible":visible_line})
+                if value<1:
+                    findings.append({"kind":"column-divider","box":list(divider.box),
+                                     "message":"List header divider is missing"})
     card = _white_card(src)
     if card:
         output_card = _white_card(dst)
@@ -405,7 +488,9 @@ def semantic_scorecard(source: Image.Image, rendered: Image.Image, scene: Node,
     imagery = float(np.mean([r["score"] for r in regions])) if regions else None
     layout_score = float(np.mean([r["score"] for r in layout])) if layout else None
     text_score = local["mean_similarity"] if local and local["checked"] else None
-    parts = [(geometry["edge_recall_4px"],.3)]
+    appearance=max(0,1-geometry.get("blurred_color_error",0)/.08)
+    parts = [(geometry["edge_recall_4px"],.25),(appearance,.15),
+             (geometry.get("edge_precision_4px",1),.1)]
     if imagery is not None:
         parts.append((imagery,.25))
     if text_score is not None:
@@ -414,7 +499,7 @@ def semantic_scorecard(source: Image.Image, rendered: Image.Image, scene: Node,
         parts.append((layout_score,.2))
     total = round(sum(value*weight for value,weight in parts)/sum(weight for _,weight in parts),3)
     return {"score":total,"passes":not findings,"fault_count":len(findings),
-            "geometry":geometry["edge_recall_4px"],
+            "geometry":geometry["edge_recall_4px"],"appearance":round(appearance,3),
             "imagery":round(imagery,3) if imagery is not None else None,
             "layout":round(layout_score,3) if layout_score is not None else None,
             "local_text":local,"regions":regions,"layout_regions":layout,
@@ -467,4 +552,5 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
         report["warnings"].append("Large regions use source-image fallback; editability is limited")
     for finding in report["scorecard"]["findings"]:
         report["warnings"].append(finding["message"])
+    report["scorecard"]["passes"] = not report["warnings"]
     return report
