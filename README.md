@@ -181,7 +181,7 @@ and the existing simplified vector artwork for details UIA does not expose.
 Small raster fallback is **off by default** in this tool; `--allow-raster` opts in.
 The ordinary PNG conversion command retains its existing behavior.
 
-The helper is C++17 with Windows SDK dependencies only. Live capture requires
+The helper is C++20 with Windows SDK dependencies only. Live capture requires
 Windows 10 version 1903 or later, a desktop supporting Windows Graphics Capture,
 and a non-minimized target window. Install Visual Studio's **Desktop development
 with C++** workload, a Windows 10/11 SDK, and CMake. From the repository root,
@@ -263,6 +263,6 @@ image; OCR can fill those gaps. Unknown artwork is simplified by the existing
 recognizer, with its existing limitations.
 
 The Windows workflow compiles native x64 and ARM64 builds and exercises actual
-Win32 UIA controls on x64. Cross-platform replay tests cover text correction,
+Win32 UIA controls, Windows Graphics Capture, and PNG encoding on x64. Cross-platform replay tests cover text correction,
 states, coordinate mapping, XML escaping, and the separate CLI. Live capture and
 screen-reader behavior still require testing on a real Windows desktop.
