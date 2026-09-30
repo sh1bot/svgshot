@@ -1,5 +1,6 @@
 // Windows SDK only: UI Automation + Windows Graphics Capture + WIC PNG.
 #include <windows.h>
+#include <ole2.h>
 #include <UIAutomation.h>
 #include <dwmapi.h>
 #include <d3d11.h>
