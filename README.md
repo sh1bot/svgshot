@@ -170,3 +170,99 @@ manifests alongside generated fixtures for real-world coverage.
   opt-in.
 - The generated SVG is an approximation. Font substitutions change line width;
   the output does not reflow labels or infer invisible accessibility metadata.
+
+## Semantic window capture (Windows)
+
+A **separate capture tool** combines a native Windows SDK helper with the existing
+Python reconstructor. Point at a window and click to capture it; Esc cancels.
+The helper reads UI Automation (UIA) and saves the window through Windows
+Graphics Capture. Python renders UIA text and control states first, using OCR
+and the existing simplified vector artwork for details UIA does not expose.
+Small raster fallback is **off by default** in this tool; `--allow-raster` opts in.
+The ordinary PNG conversion command retains its existing behavior.
+
+The helper is C++17 with Windows SDK dependencies only. Live capture requires
+Windows 10 version 1903 or later, a desktop supporting Windows Graphics Capture,
+and a non-minimized target window. Install Visual Studio's **Desktop development
+with C++** workload, a Windows 10/11 SDK, and CMake. From the repository root,
+build for your machine (use `ARM64` on Windows on ARM, `x64` on Intel/AMD):
+
+```powershell
+cmake -S capture/windows -B build/capture -A ARM64
+cmake --build build/capture --config Release
+```
+
+The Python dependencies and Tesseract are the same as for ordinary conversion.
+Run directly from the checkout, with no package reinstall after source updates:
+
+```powershell
+.\.venv\Scripts\python.exe -m svgshot.capture capture.svg --html capture.html
+```
+
+After updates to the native source, repeat `cmake --build build/capture --config
+Release`. The Python command finds `build/capture/Release/svgshot-capture-win.exe`
+automatically. `--helper path\to\svgshot-capture-win.exe`, the environment variable
+`SVGSHOT_CAPTURE_HELPER`, or an executable on `PATH` can specify another build.
+Installing the Python package also provides the `svgshot-capture` entry point;
+the native helper is named `svgshot-capture-win.exe` to avoid a command-name collision.
+
+For keyboard-based capture, switch to the intended window during a delay:
+
+```powershell
+.\.venv\Scripts\python.exe -m svgshot.capture capture.svg --foreground --delay 5
+```
+
+`--hwnd 0x123456` targets a known window handle. The picker freezes the desktop
+visually while selecting, and its click does not press a control in the target.
+The captured bitmap is a fresh window frame after selection, not that frozen
+selection preview. UIA extraction has a 20-second provider timeout and limits
+of 5000 elements / 64 levels; any truncation is recorded in the snapshot.
+
+Each live capture saves `capture.png` and `capture.uia.json` beside `capture.svg`.
+Keep the PNG/JSON pair together: they record the original image size, physical
+screen origin, accessible hierarchy, names, roles, values, focus, enabled state,
+selection, toggles, expansion, keyboard hints, and available visible text ranges.
+Password text/value and descendants are excluded by the native collector.
+These sidecars allow reprocessing on Windows, Linux, or macOS without recapture:
+
+```sh
+python -m svgshot.capture revised.svg --image capture.png --uia capture.uia.json \
+  --scene revised.scene.json --html revised.html
+```
+
+`--no-ocr` works without Tesseract and uses UIA captions/text plus vector geometry.
+UIA strings take precedence over overlapping OCR; OCR helps fit text into its
+visible ink bounds and supplies labels absent from UIA. UIA image and container
+names remain semantic descriptions rather than invented visible captions.
+`--config` accepts the existing recognition options; this capture command always
+disables source-image overlays, and only `--allow-raster` enables small raster
+fallback. The retained SVG renderer may still use its deliberate full-width
+raster title gradient.
+
+The SVG has a navigable descriptive hierarchy, source roles in `data-uia-role`,
+state descriptions, exact captured UIA metadata, and actual SVG text. It is
+explicitly a **static capture**: descriptions such as “Add…, button” convey the
+original control's meaning without offering fake clickable controls. Offscreen
+or out-of-crop nodes stay in the source snapshot but are omitted from the reader
+presentation. Visual geometry is separate from reading order to avoid duplicate
+announcements. Decorative vector shapes are hidden from the accessibility tree.
+
+Use inline SVG in documentation to expose its descendants. An `<img src="...">`
+usually presents an atomic image, losing the navigable structure. `--html`
+creates an inline SVG preview plus a standard HTML outline for readers whose SVG
+support is limited. Test the final embedding with your target browser and screen
+reader; full UIA-to-SVG behavior parity is not claimed. The original application
+can provide custom accessibility interfaces or semantics UIA does not expose.
+
+UIA and the bitmap are successive observations, not an atomic application
+snapshot. Use a stable window for documentation. The helper rejects a moved or
+resized window; it cannot detect every animation or content change. Coordinate
+mapping across a capture-size mismatch emits a warning for inspection. Provider
+text ranges may omit covered text even though window capture obtains the window
+image; OCR can fill those gaps. Unknown artwork is simplified by the existing
+recognizer, with its existing limitations.
+
+The Windows workflow compiles native x64 and ARM64 builds and exercises actual
+Win32 UIA controls on x64. Cross-platform replay tests cover text correction,
+states, coordinate mapping, XML escaping, and the separate CLI. Live capture and
+screen-reader behavior still require testing on a real Windows desktop.
