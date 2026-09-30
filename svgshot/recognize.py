@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from scipy import ndimage
 
 from .model import Node
@@ -107,6 +107,16 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
                           text=" ".join(w[4] for w in words),
                           confidence=sum(w[5] for w in words) / (100 * len(words))))
     return sorted(nodes, key=lambda n: (n.box[1], n.box[0]))
+
+
+def _ocr_ui(image: Image.Image, language: str, psm: int = 7) -> list[Node]:
+    """OCR small controls, retrying with a hard threshold when antialiasing
+    makes the normal RGB pass unreadable."""
+    result = _ocr(image, language, psm)
+    if result:
+        return result
+    gray = ImageOps.grayscale(image).point(lambda p: 0 if p < 150 else 255)
+    return _ocr(gray.convert("RGB"), language, psm)
 
 
 @lru_cache(maxsize=1)
@@ -349,6 +359,34 @@ def _titlebar_icon(image: np.ndarray) -> Node | None:
     if not (7<=x<=18 and 7<=y<=17 and 9<=w<=22 and 7<=h<=17):
         return None
     return Node("title-icon",(x-1,y-1,w+2,h+2),confidence=.7)
+
+
+def _text_area_labels(image: np.ndarray, source: Image.Image,
+                      structures: list[Node], language: str) -> list[Node]:
+    """Recover text in large white edit boxes whose border confuses OCR."""
+    labels=[]
+    for panel in structures:
+        if panel.kind not in ("outline","rect") or panel.box[2]<180 or panel.box[3]<25:
+            continue
+        x,y,w,h=panel.box
+        crop_x,crop_y,crop_w,crop_h=x,y,w,h
+        # The component pass often sees only the lower white half of a text
+        # box. Restore the full border from the adjacent label-sized region.
+        if panel.kind=="outline" and h>=35:
+            panel.box=(max(1,x-1),max(1,y-13),w+2,h+13)
+            panel.color="#707070"
+            panel.background="#ffffff"
+        crop=source.crop((max(0,crop_x+2),max(0,crop_y-14),
+                          min(source.width,crop_x+crop_w-2),
+                          min(source.height,crop_y+crop_h+16)))
+        for local in _ocr_ui(crop,language,psm=7):
+            if local.confidence<.35 or not any(c.isalpha() for c in local.text):
+                continue
+            local.text=local.text.strip(" |'\"")
+            lx,ly,lw,lh=local.box
+            local.box=(max(0,crop_x+2)+lx,max(0,crop_y-14)+ly,lw,lh)
+            labels.append(local)
+    return labels
 
 
 def _blue_rectangles(image: np.ndarray) -> list[tuple[int,int,int,int]]:
@@ -854,7 +892,7 @@ def _footer_buttons(image: np.ndarray, source: Image.Image, language: str) -> tu
                 inset = (x+2,y+2,max(x+3,right-2),max(y+3,bottom-1))
                 crop = source.crop((x,y,right,bottom+1))
                 origin = (x,y)
-                recognized = [t for t in _ocr(crop,language,psm=7)
+                recognized = [t for t in _ocr_ui(crop,language,psm=7)
                               if t.confidence >= .7 and any(c.isalpha() for c in t.text)]
                 if len(recognized) > 1:
                     break
@@ -863,7 +901,7 @@ def _footer_buttons(image: np.ndarray, source: Image.Image, language: str) -> tu
                     origin = inset[:2]
                     candidates = []
                     for psm in (6,7,11):
-                        candidates.extend(_ocr(crop,language,psm=psm))
+                        candidates.extend(_ocr_ui(crop,language,psm=psm))
                     recognized = [t for t in candidates
                                   if t.confidence >= .35 and any(c.isalpha() for c in t.text)]
                     # The sparse modes commonly return the same label with
@@ -1075,6 +1113,11 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             n.box[2]*n.box[3] > panel.box[2]*panel.box[3]*.85
             for panel in shell)]
         structural = shell+structural
+    if options.ocr:
+        for label in _text_area_labels(pixels,rgb_image,structural,options.language):
+            texts = [old for old in texts if _iou_boxes(old.box,label.box)<.2]
+            label.color = _hex(_pixel_color(pixels,label.box))
+            texts.append(label)
     for icon in _window_close_controls(pixels,texts):
         if not any(abs(old.box[0]-icon.box[0]) < 4 and
                    abs(old.box[1]-icon.box[1]) < 4
@@ -1401,7 +1444,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             examined += 1
             if examined > 30:
                 break
-            for local in _ocr(rgb_image.crop((x,y,x+cw,y+ch)), options.language, psm=7):
+            for local in _ocr_ui(rgb_image.crop((x,y,x+cw,y+ch)), options.language, psm=7):
                 if local.confidence < .65 or sum(c.isalpha() for c in local.text) < 2:
                     continue
                 lx, ly, lw, lh = local.box
