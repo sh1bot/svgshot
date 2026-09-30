@@ -6,13 +6,16 @@ import io
 import json
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from scipy import ndimage
 
 from .model import Node, flatten
-from .recognize import _ocr
+from .recognize import _ocr, _raster
+from .svg import to_svg
 
 
 def render(svg_path: str, width: int) -> Image.Image:
@@ -25,6 +28,71 @@ def render(svg_path: str, width: int) -> Image.Image:
     if process.returncode:
         raise RuntimeError("SVG rendering failed: " + process.stderr.decode(errors="replace"))
     return Image.open(io.BytesIO(process.stdout)).convert("RGB")
+
+
+def add_fidelity_regions(source: Image.Image, scene: Node, svg: str,
+                         font_family: str = "auto") -> dict | None:
+    """Retain source crops where vector reconstruction visibly fails.
+
+    These overlays are intentionally explicit scene nodes, so reports can
+    distinguish visual fidelity from editable reconstruction.
+    """
+    if not shutil.which("inkscape"):
+        return None
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory)/"draft.svg"
+        path.write_text(svg, encoding="utf-8")
+        candidate = render(str(path),source.width)
+    original = np.asarray(source.convert("RGB"),dtype=np.float32)
+    drawn = np.asarray(candidate.resize(source.size),dtype=np.float32)
+    a = ndimage.gaussian_filter(original,(1.5,1.5,0))
+    b = ndimage.gaussian_filter(drawn,(1.5,1.5,0))
+    error = np.mean(np.abs(a-b),axis=2)
+    initial = float(error.mean()/255)
+    text_nodes = [n for n in flatten(scene) if n.kind == "text"]
+    edge_recall = _geometry(source,candidate,text_nodes)["edge_recall_4px"]
+    if initial < .025 and edge_recall >= .75:
+        return {"initial_blurred_color_error":round(initial,3),
+                "initial_edge_recall_4px":edge_recall,
+                "raster_coverage":0.0,"regions":0}
+    height,width = error.shape
+    tile = 96
+    rows,cols = (height+tile-1)//tile,(width+tile-1)//tile
+    bad = np.zeros((rows,cols),dtype=bool)
+    for row in range(rows):
+        for col in range(cols):
+            patch = error[row*tile:min(height,(row+1)*tile),
+                          col*tile:min(width,(col+1)*tile)]
+            bad[row,col] = float(patch.mean()) > (4 if initial < .025 else 6)
+    regions = 0
+    covered = 0
+    # Merge only complete rectangular runs; bounding a ragged component would
+    # erase vector work inside its good tiles.
+    for row in range(rows):
+        col = 0
+        while col < cols:
+            if not bad[row,col]:
+                col += 1
+                continue
+            right = col
+            while right < cols and bad[row,right]:
+                right += 1
+            bottom = row+1
+            while bottom < rows and bad[bottom,col:right].all():
+                bottom += 1
+            bad[row:bottom,col:right] = False
+            x,y = col*tile,row*tile
+            w,h = min(width,right*tile)-x,min(height,bottom*tile)-y
+            scene.children.append(Node("fidelity-raster",(x,y,w,h),
+                                       confidence=0.0,
+                                       image_data=_raster(source,(x,y,w,h))))
+            regions += 1
+            covered += w*h
+            col = right
+    return {"initial_blurred_color_error":round(initial,3),
+            "initial_edge_recall_4px":edge_recall,
+            "raster_coverage":round(covered/(width*height),3),
+            "regions":regions}
 
 
 def _edge(image: np.ndarray) -> np.ndarray:
@@ -158,7 +226,11 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
     report = {"geometry": _geometry(source, rendered, original_text),
               "scene": {"objects": len(list(flatten(scene))) - 1,
                         "text_lines": len(original_text),
-                        "raster_islands": sum(n.kind == "raster" for n in flatten(scene))}}
+                        "raster_islands": sum(n.kind == "raster" for n in flatten(scene)),
+                        "fidelity_regions": sum(n.kind == "fidelity-raster" for n in flatten(scene)),
+                        "fidelity_raster_coverage": round(sum(n.box[2]*n.box[3]
+                            for n in flatten(scene) if n.kind == "fidelity-raster") /
+                            (source.width*source.height),3)}}
     if ocr:
         detected = _ocr(rendered, language)
         # Sparse layout mode can omit text in an isolated button. Block mode
@@ -187,4 +259,6 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
         report["warnings"].append("Text visible in the input is missing or changed in the SVG")
     if manifest and report["ground_truth"]["matched"] < report["ground_truth"]["expected"]:
         report["warnings"].append("Known fixture elements were missed")
+    if report["scene"]["fidelity_raster_coverage"] > .25:
+        report["warnings"].append("Large regions use source-image fallback; editability is limited")
     return report

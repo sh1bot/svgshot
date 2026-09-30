@@ -4,14 +4,15 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from svgshot.diagnostic import make_diagnostic
 from svgshot.fixture import generate
 from svgshot.model import Node, flatten
-from svgshot.recognize import Options, reconstruct
+from svgshot.recognize import Options, _window_close_controls, reconstruct
 from svgshot.svg import to_svg
-from svgshot.validate import compare, ground_truth, render
+from svgshot.validate import add_fidelity_regions, compare, ground_truth, render
 
 
 class PipelineTest(unittest.TestCase):
@@ -84,6 +85,40 @@ class PipelineTest(unittest.TestCase):
             result = render(str(path),200)
             self.assertLess(max(result.getpixel((180,10))),80)
             self.assertEqual(result.getpixel((185,5)),(255,255,255))
+
+    def test_close_controls_on_both_sides_of_offset_windows(self):
+        image = Image.new("RGB",(420,300),"white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((100,110,358,139),fill="#1745bb")
+        draw.rectangle((333,113,352,135),fill="#eeeeee")
+        draw.line((337,117,347,127),fill="#111111",width=2)
+        draw.line((347,117,337,127),fill="#111111",width=2)
+        draw.rectangle((30,40,300,73),fill="#eeeeee")
+        draw.ellipse((42,49,55,62),fill="#ed5d55")
+        draw.rectangle((30,76,300,104),fill="#eeeeee")
+        draw.line((42,83,52,93),fill="#111111")
+        draw.line((52,83,42,93),fill="#111111")
+        titles = [Node("text",(110,115,60,13),text="Message"),
+                  Node("text",(108,48,95,13),text="Preferences"),
+                  Node("text",(150,82,80,13),text="Settings")]
+        icons = _window_close_controls(np.asarray(image),titles)
+        self.assertTrue(any(n.kind == "close-icon" and 335 <= n.box[0] <= 340
+                            for n in icons))
+        self.assertTrue(any(n.kind == "close-dot" and n.box[0] == 42 for n in icons))
+        self.assertTrue(any(n.kind == "close-icon" and n.box[0] == 42 for n in icons))
+
+    def test_fidelity_repair_reports_raster_coverage(self):
+        image = Image.new("RGB",(288,288),"white")
+        ImageDraw.Draw(image).rectangle((18,18,170,105),fill="#2449b5")
+        scene = Node("window",(0,0,288,288),"#ffffff")
+        info = add_fidelity_regions(image,scene,to_svg(scene))
+        self.assertIsNotNone(info)
+        self.assertGreater(info["raster_coverage"],.1)
+        self.assertLess(info["raster_coverage"],1)
+        with tempfile.TemporaryDirectory() as directory:
+            svg = Path(directory)/"repaired.svg"
+            svg.write_text(to_svg(scene),encoding="utf-8")
+            self.assertEqual(render(str(svg),288).getpixel((50,50)),(36,73,181))
 
     def test_dialog_tabs_checkbox_dropdown_and_footer(self):
         image = Image.new("RGB",(361,321),"#f0f0f0")

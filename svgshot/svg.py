@@ -110,7 +110,8 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             cx, cy = x+w/2, y+h/2
             is_ring = kind in ("ring", "radio", "radio-selected")
             fill = "none" if is_ring else paint
-            stroke = _contrast(paint, surface, 3) if is_ring else "none"
+            stroke = (_contrast(paint, surface, 3) if kind in ("radio", "radio-selected")
+                      else paint if is_ring else "none")
             parts.append(f'<circle cx="{cx:g}" cy="{cy:g}" r="{radius:g}" '
                          f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
             if kind == "radio-selected":
@@ -145,8 +146,12 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         elif kind == "close-icon":
             parts.append(f'<path data-kind="close-icon" d="M{x} {y} L{x+w-1} {y+h-1} '
                          f'M{x+w-1} {y} L{x} {y+h-1}" fill="none" '
-                         f'stroke="{paint}" stroke-width="1" stroke-linecap="square"/>')
-        elif kind == "raster":
+                         f'stroke="{paint}" stroke-width="{max(1,(min(w,h)-10)*.22):g}" '
+                         f'stroke-linecap="square"/>')
+        elif kind == "close-dot":
+            parts.append(f'<circle data-kind="close-dot" cx="{x+w/2:g}" cy="{y+h/2:g}" '
+                         f'r="{min(w,h)/2:g}" fill="{paint}"/>')
+        elif kind in ("raster", "fidelity-raster"):
             parts.append(f'<image x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'xlink:href="data:image/png;base64,{node.image_data}"/>')
         for child in node.children:
@@ -160,13 +165,16 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
     for node in sorted(surfaces,key=lambda n:n.box[2]*n.box[3],reverse=True):
         draw(node, root.color)
     for node in root.children:
-        if node not in surfaces and node.kind not in ("text", "close-icon"):
-            draw(node, root.color)
-    for node in root.children:
-        if node.kind == "close-icon":
+        if node not in surfaces and node.kind not in ("text", "close-icon", "close-dot", "fidelity-raster"):
             draw(node, root.color)
     for node in root.children:
         if node.kind == "text":
+            draw(node, root.color)
+    for node in root.children:
+        if node.kind == "fidelity-raster":
+            draw(node, root.color)
+    for node in root.children:
+        if node.kind in ("close-icon", "close-dot"):
             draw(node, root.color)
     parts.append("</svg>")
     return "\n".join(parts) + "\n"

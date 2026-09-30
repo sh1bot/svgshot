@@ -10,7 +10,7 @@ from PIL import Image
 from .recognize import Options, reconstruct
 from .svg import to_svg
 from .diagnostic import make_diagnostic
-from .validate import compare
+from .validate import add_fidelity_regions, compare
 
 
 def main(argv=None) -> int:
@@ -26,6 +26,8 @@ def main(argv=None) -> int:
     parser.add_argument("--strict", action="store_true", help="Exit nonzero if the report has warnings")
     parser.add_argument("--no-ocr", action="store_true", help="Disable text detection explicitly")
     parser.add_argument("--no-raster", action="store_true", help="Discard unrecognized small details")
+    parser.add_argument("--no-fidelity", action="store_true",
+                        help="Disable measured raster repair of poor vector regions")
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
     parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
     args = parser.parse_args(argv)
@@ -45,12 +47,19 @@ def main(argv=None) -> int:
                 options.ocr = False
             if args.no_raster:
                 options.raster_fallback = False
+            if args.no_fidelity:
+                options.fidelity_fallback = False
             if args.lang:
                 options.language = args.lang
             if args.font_family:
                 options.font_family = args.font_family
             scene = reconstruct(source, options)
             svg = to_svg(scene, options.font_family)
+            fidelity = None
+            if options.raster_fallback and options.fidelity_fallback:
+                fidelity = add_fidelity_regions(source,scene,svg,options.font_family)
+                if fidelity and fidelity["regions"]:
+                    svg = to_svg(scene, options.font_family)
             args.output.write_text(svg, encoding="utf-8")
             if args.diagnostic:
                 args.diagnostic.write_text(make_diagnostic(source, svg, scene,
@@ -61,6 +70,8 @@ def main(argv=None) -> int:
                 report = compare(source, str(args.output), scene,
                                  str(args.manifest) if args.manifest else None,
                                  options.ocr, options.language)
+                if fidelity is not None:
+                    report["before_fidelity"] = fidelity
                 args.report.write_text(json.dumps(report, indent=2)+"\n", encoding="utf-8")
                 print(json.dumps(report, indent=2))
                 if args.strict and report["warnings"]:

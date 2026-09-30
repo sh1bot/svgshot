@@ -22,6 +22,7 @@ class Options:
     min_area: int = 18
     max_raster: int = 128
     raster_fallback: bool = True
+    fidelity_fallback: bool = True
     ocr: bool = True
     language: str = "eng"
     font_family: str = "auto"
@@ -123,6 +124,13 @@ def _pixel_color(image: np.ndarray, box, pad=2):
 
 def _background(image: np.ndarray) -> np.ndarray:
     h, w = image.shape[:2]
+    # A collage often has a white canvas around several grey windows; the
+    # dominant interior color then belongs to the windows, not the canvas.
+    if min(h,w) >= 200:
+        margin = np.concatenate((image[4,4:w-4],image[h-5,4:w-4],
+                                 image[4:h-4,4],image[4:h-4,w-5]))
+        if np.mean(np.min(margin,axis=1) >= 248) > .58:
+            return np.array([255,255,255],dtype=np.uint8)
     # The outer pixel is often a window frame, not a background. Use the
     # dominant color over the interior instead of a border sample.
     interior = image[2:max(3,h-2):3, 2:max(3,w-2):3].reshape(-1, 3)
@@ -236,6 +244,143 @@ def _close_icon(image: np.ndarray) -> Node | None:
         color = _hex(np.median(patch[region][mask], axis=0))
         return Node("close-icon", (left+xs.start, top+ys.start, w, h), color)
     return None
+
+
+def _blue_title_bars(image: np.ndarray) -> list[tuple[int,int,int,int]]:
+    """Locate saturated title strips independently of the canvas origin."""
+    rgb = image.astype(np.int16)
+    blue = ((rgb[:,:,2]-rgb[:,:,0] > 40) &
+            (rgb[:,:,2]-rgb[:,:,1] > 18) & (rgb[:,:,2] > 80))
+    joined = ndimage.binary_closing(blue, structure=np.ones((3,9),dtype=bool),
+                                     iterations=2)
+    labels, _ = ndimage.label(joined)
+    bars = []
+    for region in ndimage.find_objects(labels):
+        if region is None:
+            continue
+        ys, xs = region
+        w,h = xs.stop-xs.start, ys.stop-ys.start
+        if (w >= 180 and 15 <= h <= 110 and w/h >= 3 and
+                ys.stop < image.shape[0]-20 and blue[region].mean() > .65):
+            bars.append((xs.start,ys.start,w,h))
+    return bars
+
+
+def _blue_window_surfaces(image: np.ndarray) -> list[Node]:
+    """Fill the continuous body below each blue title bar as one surface."""
+    height,width = image.shape[:2]
+    surfaces = []
+    rgb = image.astype(np.int16)
+    blue = ((rgb[:,:,2]-rgb[:,:,0] > 40) &
+            (rgb[:,:,2]-rgb[:,:,1] > 18) & (rgb[:,:,2] > 80))
+    for x,y,w,h in _blue_title_bars(image):
+        if blue[y:y+h,x:x+w].mean() < .85:
+            continue
+        title_color = np.median(image[y:y+h,x:x+w].reshape(-1,3),axis=0)
+        surfaces.append(Node("rect",(x,y,w,h),_hex(title_color)))
+        left,right = max(0,x-3),min(width,x+w+3)
+        start = y+h+40
+        if start >= height-20:
+            continue
+        dark = np.mean(np.max(image[start:,left:right],axis=2)<155,axis=1) > .92
+        complete = np.flatnonzero(dark[:-2] & dark[1:-1] & dark[2:])
+        if not len(complete):
+            continue
+        bottom = start+int(complete[0])
+        if bottom-y < h+60:
+            continue
+        body = image[y+h:bottom,left:right]
+        color = _background(body)
+        surfaces.append(Node("rect",(left,y+h,right-left,bottom-y-h),_hex(color)))
+    return surfaces
+
+
+def _x_components(image: np.ndarray, box) -> list[Node]:
+    left,top,width,height = box
+    patch = image[top:top+height,left:left+width]
+    if patch.size == 0:
+        return []
+    ink = np.max(patch,axis=2) < 155
+    labels,_ = ndimage.label(ink,structure=np.ones((3,3),dtype=int))
+    found = []
+    for label,region in enumerate(ndimage.find_objects(labels),start=1):
+        if region is None:
+            continue
+        ys,xs = region
+        w,h = xs.stop-xs.start,ys.stop-ys.start
+        if not (7 <= w <= 45 and 7 <= h <= 45 and .7 <= w/h <= 1.4):
+            continue
+        shape = labels[region] == label
+        yy,xx = np.nonzero(shape)
+        tolerance = max(1.25,min(w,h)*.18)
+        a = np.abs(xx*(h-1)/max(1,w-1)-yy) <= tolerance
+        b = np.abs((w-1-xx)*(h-1)/max(1,w-1)-yy) <= tolerance
+        margin = max(2,round(min(w,h)*.13))
+        corners = (shape[:margin,:margin],shape[:margin,-margin:],
+                   shape[-margin:,:margin],shape[-margin:,-margin:])
+        if (a.mean() < .25 or b.mean() < .25 or (a|b).mean() < .60 or
+                not all(corner.any() for corner in corners)):
+            continue
+        color = _hex(np.median(patch[region][shape],axis=0))
+        found.append(Node("close-icon",(left+xs.start,top+ys.start,w,h),color))
+    return found
+
+
+def _window_close_controls(image: np.ndarray, texts: list[Node]) -> list[Node]:
+    """Find X icons beside title strips and red close dots on the left."""
+    height,width = image.shape[:2]
+    found = []
+    for x,y,w,h in _blue_title_bars(image):
+        for left,right in ((max(0,x-8),min(width,x+min(w,70))),
+                           (max(0,x+w-min(w,80)),min(width,x+w+8))):
+            top,bottom = max(0,y-8),min(height,y+h+8)
+            found.extend(_x_components(image,(left,top,right-left,bottom-top)))
+    # Light title bars may have no saturated pixels (modern Windows, macOS).
+    # Require a nearby OCR title to avoid interpreting ordinary X characters.
+    top_limit = min(height//3,220)
+    for title in texts:
+        tx,ty,tw,th = title.box
+        if ty > top_limit or th < 7 or title.confidence < .55:
+            continue
+        left = max(tx+tw+35,width//2)
+        if left >= width-4:
+            continue
+        top,bottom = max(0,ty-16),min(height,ty+th+17)
+        for icon in _x_components(image,(left,top,width-left-3,bottom-top)):
+            if abs(icon.box[1]+icon.box[3]/2-(ty+th/2)) <= max(18,th):
+                found.append(icon)
+        left_end = min(max(0,tx-30),width//3)
+        if left_end > 8:
+            for icon in _x_components(image,(3,top,left_end-3,bottom-top)):
+                ix,iy,iw,ih = icon.box
+                surround = image[max(0,iy-3):min(height,iy+ih+3),
+                                 max(0,ix-3):min(width,ix+iw+3)]
+                if (abs(iy+ih/2-(ty+th/2)) <= max(18,th) and
+                        np.min(np.median(surround.reshape(-1,3),axis=0)) >= 210):
+                    found.append(icon)
+    # A red circular control at the left of a title is a common macOS close
+    # button. Its small color component is less ambiguous than a dark X.
+    rgb = image.astype(np.int16)
+    red = ((rgb[:,:,0]-rgb[:,:,1] > 55) &
+           (rgb[:,:,0]-rgb[:,:,2] > 45) & (rgb[:,:,0] > 130))
+    labels,_ = ndimage.label(red[:top_limit],structure=np.ones((3,3),dtype=int))
+    for label,region in enumerate(ndimage.find_objects(labels),start=1):
+        if region is None:
+            continue
+        ys,xs = region
+        w,h = xs.stop-xs.start,ys.stop-ys.start
+        if not (8 <= w <= 30 and 8 <= h <= 30 and .75 <= w/h <= 1.3):
+            continue
+        if any(t.box[0] > xs.stop and abs(t.box[1]+t.box[3]/2-(ys.start+h/2)) < 20
+               for t in texts):
+            color = _hex(np.median(image[region][labels[region]==label],axis=0))
+            found.append(Node("close-dot",(xs.start,ys.start,w,h),color))
+    unique = []
+    for node in found:
+        if not any(abs(node.box[0]-n.box[0]) < 4 and abs(node.box[1]-n.box[1]) < 4
+                   for n in unique):
+            unique.append(node)
+    return unique
 
 
 def _group_frames(image: np.ndarray) -> list[Node]:
@@ -413,6 +558,7 @@ def _structure(image: np.ndarray) -> list[Node]:
         return []
     white = np.min(image, axis=2) >= 250
     nodes = []
+    nodes.extend(_blue_window_surfaces(image))
     interior = np.median(image[2:height-2:5,2:width-2:5].reshape(-1,3),axis=0)
     # Screen captures often include a one-pixel window frame with a color
     # unrelated to the dominant interior surface.
@@ -479,6 +625,11 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     root = Node("window", (0, 0, w, h), _hex(background))
     structural = _structure(pixels)
     texts = _ocr(rgb_image, options.language) if options.ocr else []
+    for icon in _window_close_controls(pixels,texts):
+        if not any(abs(old.box[0]-icon.box[0]) < 4 and
+                   abs(old.box[1]-icon.box[1]) < 4
+                   for old in structural if old.kind in ("close-icon","close-dot")):
+            structural.append(icon)
     if options.ocr:
         # Page segmentation modes fail differently on compact dialogs. Prefer
         # the higher-confidence reading of a shared line; keep isolated lines.
