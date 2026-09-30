@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import io
 import json
+import re
 import shutil
 import subprocess
+from functools import lru_cache
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 
@@ -104,6 +107,14 @@ def _ocr(image: Image.Image, language: str, psm: int = 11) -> list[Node]:
                           text=" ".join(w[4] for w in words),
                           confidence=sum(w[5] for w in words) / (100 * len(words))))
     return sorted(nodes, key=lambda n: (n.box[1], n.box[0]))
+
+
+@lru_cache(maxsize=1)
+def _tesseract_version() -> tuple[int, int]:
+    result = subprocess.run(["tesseract", "--version"], capture_output=True,
+                            text=True, check=False)
+    match = re.search(r"tesseract\s+(\d+)\.(\d+)", result.stdout.lower())
+    return (int(match.group(1)), int(match.group(2))) if match else (0, 0)
 
 
 def _pixel_color(image: np.ndarray, box, pad=2):
@@ -836,14 +847,41 @@ def _footer_buttons(image: np.ndarray, source: Image.Image, language: str) -> tu
             bottoms = [bottom for bottom in range(y+17,min(height,y+34))
                        if np.mean(np.all(image[bottom,x:right] == color,axis=1)) >= .98]
             for bottom in reversed(bottoms):
+                # Newer Tesseract releases can change the confidence or split
+                # punctuation on a small bordered button. Read the interior
+                # with several sparse modes and choose the strongest single
+                # candidate instead of requiring one exact TSV result.
+                inset = (x+2,y+2,max(x+3,right-2),max(y+3,bottom-1))
                 crop = source.crop((x,y,right,bottom+1))
+                origin = (x,y)
                 recognized = [t for t in _ocr(crop,language,psm=7)
                               if t.confidence >= .7 and any(c.isalpha() for c in t.text)]
+                if len(recognized) > 1:
+                    break
+                if not recognized and _tesseract_version() >= (5, 5):
+                    crop = source.crop(inset)
+                    origin = inset[:2]
+                    candidates = []
+                    for psm in (6,7,11):
+                        candidates.extend(_ocr(crop,language,psm=psm))
+                    recognized = [t for t in candidates
+                                  if t.confidence >= .35 and any(c.isalpha() for c in t.text)]
+                    # The sparse modes commonly return the same label with
+                    # slightly different punctuation. Treat those as one
+                    # reading when their boxes overlap.
+                    unique = []
+                    for candidate in sorted(recognized,key=lambda t:t.confidence,reverse=True):
+                        if not any(_iou_boxes(candidate.box,old.box)>.5 and
+                                   difflib.SequenceMatcher(None,
+                                       candidate.text.casefold(),old.text.casefold()).ratio()>.75
+                                   for old in unique):
+                            unique.append(candidate)
+                    recognized = unique
                 if len(recognized) != 1:
                     break
                 label = recognized[0]
                 lx,ly,lw,lh = label.box
-                label.box = (x+lx,y+ly,lw,lh)
+                label.box = (origin[0]+lx,origin[1]+ly,lw,lh)
                 controls.append(Node("outlined-button", (x,y,right-x,bottom-y+1),
                                      _hex(color), background=_hex(image[y+4,x+5])))
                 labels.append(label)
