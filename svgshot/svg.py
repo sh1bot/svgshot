@@ -75,7 +75,8 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
              f'viewBox="0 0 {width} {height}" role="img">',
              f'<rect width="{width}" height="{height}" fill="{root.color}"/>']
 
-    filled = [node for node in flatten(root) if node.kind in ("rect", "button", "gradient-title") or
+    filled = [node for node in flatten(root) if node.kind in ("rect", "button", "gradient-title",
+                                                          "dialog-panel", "window-header") or
               (node.kind == "outlined-button" and node.background)]
 
     def surface_at(node: Node, inherited: str) -> str:
@@ -94,11 +95,29 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         kind = node.kind
         paint = node.color
         grouped = kind in ("button", "outlined-button", "beveled-button", "radio", "radio-selected",
-                           "checkbox", "checkbox-selected", "dropdown", "radio-group")
+                           "checkbox", "checkbox-selected", "dropdown", "radio-group", "multicolor-mark")
         if grouped:
             parts.append(f'<g data-kind="{kind}">')
-        if kind == "text":
-            paint = _contrast(paint, surface_at(node, surface))
+        if kind == "decorative-background":
+            data = node.vector_data
+            parts.append('<defs><linearGradient id="decorative-base" gradientUnits="userSpaceOnUse" '
+                         f'x1="{x}" y1="{y}" x2="{x+w}" y2="{y+h}">'
+                         f'<stop stop-color="{data["top_left"]}"/>'
+                         f'<stop offset="1" stop-color="{data["bottom_right"]}"/>'
+                         '</linearGradient><radialGradient id="decorative-glow">'
+                         f'<stop stop-color="{data["top_right"]}" stop-opacity=".9"/>'
+                         f'<stop offset="1" stop-color="{data["top_right"]}" stop-opacity="0"/>'
+                         '</radialGradient></defs>')
+            parts.append(f'<g data-kind="decorative-background"><rect x="{x}" y="{y}" '
+                         f'width="{w}" height="{h}" fill="url(#decorative-base)"/>')
+            parts.append(f'<ellipse cx="{x+w*.84:g}" cy="{y+h*.25:g}" '
+                         f'rx="{w*.85:g}" ry="{h*.7:g}" fill="url(#decorative-glow)"/>')
+            if data.get("wave_path"):
+                parts.append(f'<path d="{data["wave_path"]}" fill="{data["wave_color"]}"/>')
+            parts.append('</g>')
+        elif kind == "text":
+            paint = _contrast(paint, surface_at(node, surface),
+                              3 if node.vector_data.get("role")=="link" else 4.4)
             size, baseline = text_layout(node, font_family)
             weight = ' font-weight="600"' if 14.5 <= size < 22 and len(node.text) < 30 else ""
             parts.append(f'<text x="{x}" y="{baseline:g}" fill="{paint}" '
@@ -116,6 +135,16 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                          f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>')
             if kind == "radio-selected":
                 parts.append(f'<circle cx="{cx:g}" cy="{cy:g}" r="{radius*.48:g}" fill="{stroke}"/>')
+        elif kind == "dialog-panel":
+            parts.append(f'<g data-kind="dialog-panel"><rect x="{x+1}" y="{y+2}" '
+                         f'width="{w}" height="{h}" fill="#000000" opacity=".09"/>')
+            parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+                         f'fill="#ffffff" stroke="#e3e3e3" stroke-width=".7"/></g>')
+            surface = "#ffffff"
+        elif kind == "window-header":
+            parts.append(f'<rect data-kind="window-header" x="{x}" y="{y}" '
+                         f'width="{w}" height="{h}" fill="{paint}"/>')
+            surface = paint
         elif kind in ("rect", "button"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
                          f'rx="{min(4, h/6):g}" fill="{paint}"/>')
@@ -154,7 +183,7 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                          f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
             if kind == "tab-active":
                 parts.append(f'<path d="M{x+1} {y+h-1} h{w-2}" stroke="#ffffff"/>')
-        elif kind == "line":
+        elif kind in ("line", "input-underline"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')
         elif kind == "close-icon":
             parts.append(f'<path data-kind="close-icon" d="M{x} {y} L{x+w-1} {y+h-1} '
@@ -178,11 +207,14 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
 
     # Surfaces precede controls; tiny title-bar icons must remain above even
     # broad rectangles recovered later by the quantized geometry pass.
+    for node in root.children:
+        if node.kind == "decorative-background":
+            draw(node, root.color)
     surfaces = [n for n in root.children if n.kind == "rect" and n.box[2]*n.box[3] > 1000]
     for node in sorted(surfaces,key=lambda n:n.box[2]*n.box[3],reverse=True):
         draw(node, root.color)
     for node in root.children:
-        if node not in surfaces and node.kind not in ("text", "close-icon", "close-dot",
+        if node not in surfaces and node.kind not in ("text", "close-icon", "close-dot", "decorative-background",
                                                      "fidelity-raster", "gradient-title"):
             draw(node, root.color)
     for node in root.children:

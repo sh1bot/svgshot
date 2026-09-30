@@ -11,10 +11,13 @@ from svgshot.diagnostic import make_diagnostic
 from svgshot.fixture import generate
 from svgshot.model import Node, flatten
 from svgshot.recognize import (Options, _blue_window_surfaces,
-                               _large_beveled_buttons, _window_close_controls,
+                               _decorative_background, _large_beveled_buttons,
+                               _multicolor_marks, _window_close_controls,
+                               _window_shell,
                                reconstruct)
 from svgshot.svg import to_svg
-from svgshot.validate import add_fidelity_regions, compare, ground_truth, render
+from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
+                              render, semantic_scorecard)
 
 
 class PipelineTest(unittest.TestCase):
@@ -146,6 +149,51 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(svg.count('data-kind="gradient-title"'),1)
         self.assertEqual(svg.count('data-kind="beveled-button"'),2)
         self.assertNotIn('data-kind="fidelity-raster"',svg)
+
+    def test_semantic_imagery_scoring_finds_missing_vector_regions(self):
+        image = Image.new("RGB",(400,400),"#f1eef3")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((1,1,398,29),fill="white")
+        draw.text((10,9),"Preferences",fill="black",
+                  font=ImageFont.truetype("DejaVuSans.ttf",12))
+        draw.rectangle((1,30,398,398),fill="#dceef9")
+        draw.rectangle((250,30,398,398),fill="#f2ecf3")
+        draw.polygon(((1,210),(200,320),(170,398),(1,398)),fill="#f8fdfd")
+        draw.rectangle((70,100,329,299),fill="white")
+        for x,y,color in ((100,140,"#f25022"),(113,140,"#7fba00"),
+                          (100,153,"#00a4ef"),(113,153,"#ffb900")):
+            draw.rectangle((x,y,x+11,y+11),fill=color)
+        draw.text((100,184),"someone@example.com",fill="#555555",
+                  font=ImageFont.truetype("DejaVuSans.ttf",12))
+        draw.line((100,206,305,206),fill="#666666")
+        pixels = np.asarray(image)
+        mark = _multicolor_marks(pixels)
+        backdrop = _decorative_background(pixels)
+        self.assertEqual(len(mark),1)
+        self.assertIsNotNone(backdrop)
+        shell,title = _window_shell(pixels,image,"eng",True)
+        self.assertEqual([n.kind for n in shell],["window-header","dialog-panel"])
+        self.assertEqual(title.text,"Preferences")
+        from svgshot.recognize import _input_underlines, _ocr
+        rule = _input_underlines(pixels,_ocr(image,"eng"),shell[-1].box)
+        self.assertEqual(len(rule),1)
+        scene = Node("window",(0,0,400,400),"#ffffff",
+                     children=[backdrop,*shell,*mark,title,*rule])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/"vector.svg"
+            path.write_text(to_svg(scene),encoding="utf-8")
+            drawn = render(str(path),400)
+        baseline = semantic_scorecard(image,Image.new("RGB",image.size,"white"),
+                                      Node("window",(0,0,400,400),"#ffffff"),
+                                      {"edge_recall_4px":.5},"eng",True)
+        improved = semantic_scorecard(image,drawn,scene,
+                                      {"edge_recall_4px":.5},"eng",True)
+        self.assertEqual({f["kind"] for f in baseline["findings"]},
+                         {"dialog-panel","window-title","input-underline",
+                          "missing-vector-icon","decorative-region"})
+        self.assertGreater(improved["imagery"],baseline["imagery"])
+        self.assertIn("input-underline",{r["kind"] for r in improved["layout_regions"]})
+        self.assertFalse(any(n.kind == "raster" for n in scene.children))
 
     def test_dialog_tabs_checkbox_dropdown_and_footer(self):
         image = Image.new("RGB",(361,321),"#f0f0f0")

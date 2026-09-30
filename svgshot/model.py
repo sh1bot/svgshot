@@ -13,9 +13,10 @@ class Node:
     confidence: float = 1.0
     children: list["Node"] = field(default_factory=list)
     image_data: str = ""
+    vector_data: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "kind": self.kind,
             "box": list(self.box),
             "color": self.color,
@@ -24,6 +25,9 @@ class Node:
             "confidence": round(self.confidence, 3),
             "children": [child.to_dict() for child in self.children],
         }
+        if self.vector_data:
+            result["vector_data"] = self.vector_data
+        return result
 
 
 def flatten(node: Node):

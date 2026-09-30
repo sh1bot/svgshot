@@ -14,7 +14,8 @@ from PIL import Image
 from scipy import ndimage
 
 from .model import Node, flatten
-from .recognize import _ocr, _raster
+from .recognize import (_ocr, _raster, _multicolor_marks, _input_underlines,
+                        _decorative_background, _white_card, _window_shell)
 from .svg import to_svg
 
 
@@ -162,6 +163,20 @@ def _text(source: list[Node], rendered: list[Node], image: Image.Image,
             found.add(best[1])
             matches.append(item.text)
             continue
+        # A footer or menu row may become several SVG text nodes. Compare the
+        # joined reading when their baselines and combined span agree.
+        row = sorted(((i,candidate) for i,candidate in enumerate(rendered)
+                      if i not in found and abs(item.box[1]-candidate.box[1]) <= max(12,item.box[3]) and
+                      item.box[0]-20 <= candidate.box[0] <= item.box[0]+item.box[2]+20),
+                     key=lambda pair:pair[1].box[0])
+        if len(row)>=2:
+            joined = " ".join(candidate.text for _,candidate in row)
+            import re
+            normalize = lambda s:re.sub(r"[^\w\s]", "",s.casefold())
+            if difflib.SequenceMatcher(None,normalize(item.text),normalize(joined)).ratio() >= threshold:
+                found.update(i for i,_ in row)
+                matches.append(item.text)
+                continue
         x, y, w, h = item.box
         left, top = max(0,x-6), max(0,y-6)
         right, bottom = min(image.width,x+w+16), min(image.height,y+h+9)
@@ -219,6 +234,193 @@ def ground_truth(scene: Node, manifest_path: str) -> dict:
             "expected": len(results), "elements": results}
 
 
+def _clean_ocr(value: str) -> str:
+    import re
+    value = re.sub(r"^i(?=[A-Z][a-z])", "",value.strip(" ‘'|:;,."))
+    return " ".join(value.casefold().split())
+
+
+def _local_text_checks(source: Image.Image, rendered: Image.Image,
+                       scene: Node, language: str) -> dict:
+    checks = []
+    for node in flatten(scene):
+        if node.kind != "text" or len(node.text) < 8 or node.confidence < .7:
+            continue
+        x,y,w,h = node.box
+        left,top = max(0,x-10),max(0,y-1)
+        right,bottom = min(source.width,x+w+2),min(source.height,y+h+1)
+        if right-left < 20 or bottom-top < 6:
+            continue
+        box = (left,top,right,bottom)
+        expected = _ocr(source.crop(box),language,psm=7)
+        observed = _ocr(rendered.crop(box),language,psm=7)
+        if len(expected)!=1 or expected[0].confidence<.8:
+            continue
+        a = _clean_ocr(expected[0].text)
+        b = _clean_ocr(observed[0].text) if len(observed)==1 else ""
+        if len(a)<8:
+            continue
+        similarity = difflib.SequenceMatcher(None,a,b).ratio()
+        first_a,first_b = a.split()[0],b.split()[0] if b else ""
+        # A control or preceding label can enter the expanded crop in only
+        # one rendering. The reference text is intact when it is a suffix.
+        extra_left_context = b.endswith(a) and b!=a
+        first_mismatch = (not extra_left_context and len(first_a)>=3 and
+                          difflib.SequenceMatcher(None,first_a,first_b).ratio()<=.8)
+        checks.append({"box":[left,top,right-left,bottom-top],"source":a,
+                       "rendered":b,"similarity":round(similarity,3),
+                       "fault":(similarity<.84 and not extra_left_context) or first_mismatch})
+    return {"checked":len(checks),"faults":[c for c in checks if c["fault"]],
+            "mean_similarity":round(float(np.mean([c["similarity"] for c in checks])),3)
+            if checks else None}
+
+
+def semantic_scorecard(source: Image.Image, rendered: Image.Image, scene: Node,
+                       geometry: dict, language: str, check_text: bool) -> dict:
+    """Score proposed semantic image regions separately from text and edges."""
+    src = np.asarray(source.convert("RGB"))
+    dst = np.asarray(rendered.resize(source.size).convert("RGB"))
+    source_marks = _multicolor_marks(src)
+    output_marks = _multicolor_marks(dst)
+    scene_nodes = list(flatten(scene))
+    findings = []
+    regions = []
+    layout = []
+    card = _white_card(src)
+    if card:
+        output_card = _white_card(dst)
+        card_iou = _iou(card,output_card) if output_card else 0.0
+        vector = any(n.kind=="dialog-panel" and _iou(n.box,card)>.8
+                     for n in scene_nodes)
+        score = round(.5*int(vector)+.5*card_iou,3)
+        layout.append({"kind":"dialog-panel","box":list(card),"score":score,
+                       "vector":vector,"visible_iou":round(card_iou,3)})
+        if score<.8:
+            findings.append({"kind":"dialog-panel","box":list(card),
+                             "message":"Inset white dialog panel is missing as a bounded surface"})
+        shell,title = _window_shell(src,source,language,True) if check_text else ([],None)
+        if title:
+            title_node = next((n for n in scene_nodes if n.kind=="text" and
+                               n.vector_data.get("role")=="window-title"),None)
+            sx,sy,sw,sh = title.box
+            crop = (max(0,sx-5),max(0,sy-4),
+                    min(source.width,sx+sw+15),min(source.height,sy+sh+6))
+            local = _ocr(rendered.crop(crop),language,psm=7)
+            matched = max((difflib.SequenceMatcher(None,_clean_ocr(title.text),
+                       _clean_ocr(t.text)).ratio() for t in local),default=0.0)
+            position = _iou(title_node.box,title.box) if title_node else 0.0
+            header = any(n.kind=="window-header" for n in scene_nodes)
+            score = round(.3*int(title_node is not None and header)+.5*matched+
+                          .2*position,3)
+            layout.append({"kind":"window-title","box":list(title.box),
+                           "text":title.text,"score":score,
+                           "rendered_similarity":round(matched,3),
+                           "bound_to_header":title_node is not None and header})
+            if score<.8:
+                findings.append({"kind":"window-title","box":list(title.box),
+                                 "message":"Outer window title is missing, misread, or unbound from its title strip"})
+        source_labels = _ocr(source,language) if check_text else []
+        for rule in _input_underlines(src,source_labels,card):
+            visible = any(_iou(rule.box,n.box)>.8 for n in
+                          _input_underlines(dst,source_labels,_white_card(dst)))
+            vector = any(n.kind=="input-underline" and _iou(n.box,rule.box)>.8
+                         for n in scene_nodes)
+            score = .5*int(visible)+.5*int(vector)
+            layout.append({"kind":"input-underline","box":list(rule.box),
+                           "score":score,"vector":vector,"visible":visible})
+            if score<1:
+                findings.append({"kind":"input-underline","box":list(rule.box),
+                                 "message":"Email field underline is missing or displaced"})
+        for label in source_labels:
+            x,y,w,h = label.box
+            if not (card[0]<x and card[1]<y and x+w<card[0]+card[2] and
+                    y+h<card[1]+card[3] and w>=35):
+                continue
+            if any(_iou(label.box,mark.box)>.05 for mark in source_marks):
+                continue
+            area = (slice(y,min(source.height,y+h)),slice(x,min(source.width,x+w)))
+            original = src[area].astype(int)
+            blue = (original[:,:,2]-original[:,:,0]>55)&(original[:,:,2]-original[:,:,1]>10)
+            fraction = float(blue.mean())
+            if not .02<fraction<.45:
+                continue
+            output = dst[area].astype(int)
+            output_blue = (output[:,:,2]-output[:,:,0]>55)&(output[:,:,2]-output[:,:,1]>10)
+            visible = float(output_blue.mean()) >= fraction*.35
+            vector = any(n.kind=="text" and _iou(n.box,label.box)>.45
+                         for n in scene_nodes)
+            score = .5*int(visible)+.5*int(vector)
+            layout.append({"kind":"link-ink","box":list(label.box),
+                           "score":score,"vector":vector,"visible":visible})
+            if score<1:
+                findings.append({"kind":"link-ink","box":list(label.box),
+                                 "message":"Link text lost its blue color or vector label"})
+    for mark in source_marks:
+        box = mark.box
+        recognized = any(n.kind=="multicolor-mark" and _iou(n.box,box)>.6
+                         for n in scene_nodes)
+        visible = any(_iou(n.box,box)>.6 for n in output_marks)
+        raster = any(n.kind in ("raster","fidelity-raster") and _iou(n.box,box)>.3
+                     for n in scene_nodes)
+        score = 1.0 if recognized and visible and not raster else 0.0
+        regions.append({"kind":"multicolor-mark","box":list(box),"score":score,
+                        "vector":recognized and not raster,"visible":visible})
+        if score<1:
+            findings.append({"kind":"missing-vector-icon","box":list(box),
+                             "message":"Multicolor mark is missing or raster-backed"})
+    decoration = _decorative_background(src)
+    if decoration:
+        x,y,w,h = decoration.box
+        mask = np.zeros((source.height,source.width),bool)
+        mask[y:y+h,x:x+w] = True
+        if card:
+            cx,cy,cw,ch = card
+            mask[max(0,cy-3):min(source.height,cy+ch+3),
+                 max(0,cx-3):min(source.width,cx+cw+3)] = False
+        original_blur = ndimage.gaussian_filter(src.astype(float),(12,12,0))
+        rendered_blur = ndimage.gaussian_filter(dst.astype(float),(12,12,0))
+        color_error = float(np.mean(np.abs(original_blur-rendered_blur)[mask])/255)
+        wave_mask = mask.copy()
+        wave_mask[:int(source.height*.7)] = False
+        wave_mask[:,int(source.width*.72):] = False
+        a = (src[:,:,0]>=246)&(src[:,:,1]>=249)&(src[:,:,2]>=250)
+        b = (dst[:,:,0]>=246)&(dst[:,:,1]>=249)&(dst[:,:,2]>=250)
+        boundary_agreement = float(np.mean(a[wave_mask]==b[wave_mask])) if wave_mask.any() else 1.0
+        vector = any(n.kind=="decorative-background" and _iou(n.box,decoration.box)>.7
+                     for n in scene_nodes)
+        score = round(.25*int(vector)+.35*max(0,1-color_error/.06)+
+                      .4*boundary_agreement,3)
+        regions.append({"kind":"decorative-background","box":list(decoration.box),
+                        "score":score,"vector":vector,
+                        "blurred_color_error":round(color_error,3),
+                        "shape_agreement":round(boundary_agreement,3)})
+        if not vector or score<.75:
+            findings.append({"kind":"decorative-region","box":list(decoration.box),
+                             "message":"Backdrop is missing as vector art or differs substantially"})
+    local = _local_text_checks(source,rendered,scene,language) if check_text else None
+    if local:
+        for fault in local["faults"]:
+            findings.append({"kind":"local-text","box":fault["box"],
+                             "message":f'Text differs: {fault["source"]!r} vs {fault["rendered"]!r}'})
+    imagery = float(np.mean([r["score"] for r in regions])) if regions else None
+    layout_score = float(np.mean([r["score"] for r in layout])) if layout else None
+    text_score = local["mean_similarity"] if local and local["checked"] else None
+    parts = [(geometry["edge_recall_4px"],.3)]
+    if imagery is not None:
+        parts.append((imagery,.25))
+    if text_score is not None:
+        parts.append((text_score,.25))
+    if layout_score is not None:
+        parts.append((layout_score,.2))
+    total = round(sum(value*weight for value,weight in parts)/sum(weight for _,weight in parts),3)
+    return {"score":total,"passes":not findings,"fault_count":len(findings),
+            "geometry":geometry["edge_recall_4px"],
+            "imagery":round(imagery,3) if imagery is not None else None,
+            "layout":round(layout_score,3) if layout_score is not None else None,
+            "local_text":local,"regions":regions,"layout_regions":layout,
+            "findings":findings}
+
+
 def compare(source: Image.Image, svg_path: str, scene: Node,
             manifest: str | None = None, ocr: bool = True, language: str = "eng") -> dict:
     rendered = render(svg_path, source.width)
@@ -248,6 +450,8 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
                      if item.confidence >= .75]
         report["source_text"] = _text(reference, detected, rendered, language,
                                       threshold=.86)
+    report["scorecard"] = semantic_scorecard(source,rendered,scene,report["geometry"],
+                                              language,ocr)
     if manifest:
         report["ground_truth"] = ground_truth(scene, manifest)
     report["warnings"] = []
@@ -261,4 +465,6 @@ def compare(source: Image.Image, svg_path: str, scene: Node,
         report["warnings"].append("Known fixture elements were missed")
     if report["scene"]["fidelity_raster_coverage"] > .25:
         report["warnings"].append("Large regions use source-image fallback; editability is limited")
+    for finding in report["scorecard"]["findings"]:
+        report["warnings"].append(finding["message"])
     return report

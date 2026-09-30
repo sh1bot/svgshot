@@ -6,6 +6,9 @@ uses OCR for SVG `<text>`, color regions for panels and buttons, fits small
 circles and outlines, groups radio controls with their captions, and embeds
 unrecognized artwork as PNG islands. It looks for title bars and close controls
 at either end of a window, including windows inside a larger desktop image.
+For some modern dialogs it also identifies an inset white card and its outer
+window title, a compact four-color mark, and a smooth illustrated backdrop.
+Those regions become named SVG surfaces, colored squares, gradients, and paths.
 It reduces shadows, antialiasing noise, and tiny color variants. A recognized
 blue title gradient uses one narrow PNG strip stretched across the whole bar,
 with editable caption and close control above it. Faint watermark detail may
@@ -101,16 +104,27 @@ changes. The report keeps several checks separate:
 | `blurred_color_error` | Mean RGB difference after a 3-pixel blur, divided by 255 | Detects large missing surfaces while allowing small decorative changes. |
 | `text.recall` | Whether OCR of the rendered SVG recovers text in the reconstructed scene | Detects drawing errors, but can pass when the source OCR was wrong. |
 | `source_text.recall` | Whether rendered OCR recovers a separate, high-confidence OCR pass over the input | Detects transcription errors and omitted labels without trusting the scene's text; check `missing` for details. |
+| `scorecard.layout_regions` | Independently detected inset panel, outer window title, email field underline, and blue link ink | Checks explicit vector boundaries, title text, thin field rules, and link color. Each result has a box and score. |
+| `scorecard.regions` | Independently detected compact multicolor marks and decorative backdrops | Checks that they remain vector objects and compares their visible colors and broad shape. |
+| `scorecard.local_text` | OCR of small source and output crops around each confident text label | Catches a lost first letter that whole-image OCR recall can overlook. Nearby controls can still confuse OCR. |
+| `scorecard.findings` | Actionable faults with `kind`, `box`, and message | Inspect these first. `passes` is false when any semantic finding remains; `score` combines geometry, text, layout, and imagery for ranking iterations. |
 | `ground_truth` | Known labels and control boxes in an optional manifest | Detects omissions that visual comparison and input OCR may both miss. |
 | `before_fidelity` | Initial color error and edge recall, plus selected overlay coverage and region count | Legacy field name; shows the initial reconstruction before source crops mask mistakes. Present only with `--source-overlays`. |
 | `scene.fidelity_raster_coverage` | Area covered by source PNG overlays | Legacy field name; a high value means limited editability. Over 25% adds a warning. |
 
-These are diagnostics, not a claim that one number captures correctness.
+Run the converter with `--report quality.json`, then compare `scorecard.score`,
+`scorecard.passes`, and its localized `findings` across iterations. The overall
+score is useful for sorting candidates; treat a failing semantic region as a
+fault even when global color error is small. These are diagnostics, not a claim
+that one number captures correctness.
 Current warning thresholds are deliberately simple starting points. Inspect
 the individual missed elements and the rendered SVG before adjusting them.
 Text positions and font metrics can vary without invalidating the result.
 The separate OCR pass still cannot prove that both readers did not make the
 same mistake; a manually checked manifest is stronger evidence.
+The region proposals and the reconstruction share shape heuristics: a novel
+icon or panel they both miss cannot be discovered by this scorecard alone.
+Add independently specified boxes and labels to a manifest for that case.
 
 Create two deterministic Windows-style fixtures and compare them with known
 element boxes and text. The manifest comes from the fixture specification,
@@ -146,5 +160,9 @@ manifests alongside generated fixtures for real-world coverage.
   need corpus validation.
 - Color quantization and simple shape fitting can merge nearby controls or
   misclassify unusual UI. Inspect `--scene` and adjust the settings.
+- The current vector backdrop and multicolor-mark detectors cover a limited
+  family of clean, axis-aligned illustrations. Other decorative art may become
+  simplified shapes or a small embedded detail; source-image overlays remain
+  opt-in.
 - The generated SVG is an approximation. Font substitutions change line width;
   the output does not reflow labels or infer invisible accessibility metadata.
