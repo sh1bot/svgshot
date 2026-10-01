@@ -92,7 +92,7 @@ final class Reader {
                         style["font_size"]=font[kAXFontSizeKey] as? NSNumber
                         style["font_size_unit"]="pt"
                     }
-                    if let color=attrs[kAXForegroundColorTextAttribute], CFGetTypeID(color as CFTypeRef)==CGColorGetTypeID() {
+                    if let color=attrs[kAXForegroundColorTextAttribute], CFGetTypeID(color as CFTypeRef)==CGColor.typeID {
                         let c=color as! CGColor
                         if let rgb=c.converted(to:CGColorSpace(name:CGColorSpace.sRGB)!,intent:.defaultIntent,options:nil), let parts=rgb.components, parts.count>=3 {
                             style["foreground"]=String(format:"#%02x%02x%02x",Int((parts[0]*255).rounded()),Int((parts[1]*255).rounded()),Int((parts[2]*255).rounded()))

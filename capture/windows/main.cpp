@@ -849,11 +849,15 @@ std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
     check_hresult(frame->WritePixels(height, stride, stride * height, pixels));
     check_hresult(frame->Commit());
     check_hresult(encoder->Commit());
-    STATSTG stat{}; check_hresult(stream->Stat(&stat, STATFLAG_NONAME));
+    STATSTG stat{};
+    check_hresult(stream->Stat(&stat, STATFLAG_NONAME));
     std::string png(static_cast<size_t>(stat.cbSize.QuadPart), '\0');
-    LARGE_INTEGER zero{}; check_hresult(stream->Seek(zero, STREAM_SEEK_SET, nullptr));
-    ULONG read=0; check_hresult(stream->Read(png.data(), static_cast<ULONG>(png.size()), &read));
-    if(read!=png.size()) throw std::runtime_error("Cannot read PNG memory stream");
+    LARGE_INTEGER zero{};
+    check_hresult(stream->Seek(zero, STREAM_SEEK_SET, nullptr));
+    ULONG read = 0;
+    check_hresult(stream->Read(png.data(), static_cast<ULONG>(png.size()), &read));
+    if (read != png.size())
+        throw std::runtime_error("Cannot read PNG memory stream");
     return png;
 }
 SIZE capture_png(HWND hwnd, std::string &png)
@@ -1021,7 +1025,8 @@ int wmain(int argc, wchar_t **argv)
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         HWND hwnd = nullptr;
         std::wstring prefix;
-        bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false, stdoutPng = false;
+        bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false,
+             stdoutPng = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -1129,13 +1134,18 @@ int wmain(int argc, wchar_t **argv)
                "content\":"
             << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
         auto normalized = unified::normalize(out.str());
-        if (!uiaOnly) {
+        if (!uiaOnly)
+        {
             png = embedded_png(std::move(png), normalized);
-            if(stdoutPng) {
+            if (stdoutPng)
+            {
                 _setmode(_fileno(stdout), _O_BINARY);
                 std::cout.write(png.data(), static_cast<std::streamsize>(png.size()));
-                if(!std::cout) throw std::runtime_error("Cannot write PNG to stdout");
-            } else write_capture(std::filesystem::path(prefix + L".png"), png);
+                if (!std::cout)
+                    throw std::runtime_error("Cannot write PNG to stdout");
+            }
+            else
+                write_capture(std::filesystem::path(prefix + L".png"), png);
         }
         if (jsonExport || uiaOnly)
         {

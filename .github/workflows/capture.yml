@@ -39,7 +39,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad --include-hidden-content
             if ($LASTEXITCODE -ne 0) { throw 'Opt-in full capture failed' }
-            python tests/native_capture_smoke.py
+            python tests/native_capture_smoke.py "$($fixture.MainWindowHandle)"
             if ($LASTEXITCODE -ne 0) { throw 'Embedded snapshot or broad semantics validation failed' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/embedded
             if ($LASTEXITCODE -ne 0) { throw 'Self-contained capture failed' }

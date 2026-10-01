@@ -47,3 +47,13 @@ assert 'PasswordHiddenSentinel' not in json.dumps(broad), 'Password leaked in op
 assert any('value' in n['states'] for n in walk(broad['root']) if not n['password']), 'Opt-in values missing'
 
 assert any(r.get('attributes') and r.get('format_runs') for n in walk(broad['root']) for r in n['text_ranges']), 'No text formatting captured'
+
+# Native stdout must contain a complete semantic PNG with no temporary capture path.
+if len(sys.argv)>1:
+    import subprocess,io
+    result=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],'--stdout'],stdout=subprocess.PIPE,check=True)
+    streamed=read_snapshot(io.BytesIO(result.stdout))
+    validate(streamed)
+    assert streamed['root']['label']=='svgshot Capture Fixture'
+    assert 'PasswordHiddenSentinel' not in json.dumps(streamed)
+    print('Validated direct in-memory native PNG capture')

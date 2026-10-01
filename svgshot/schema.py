@@ -52,6 +52,8 @@ def from_uia(snapshot):
         raise ValueError('Unsupported legacy capture schema')
     width, height = snapshot['image_size']
     sx, sy, sw, sh = snapshot['screen_bounds']
+    if any(type(v) is not int or v <= 0 for v in (width,height)) or any(type(v) not in (int,float) or not math.isfinite(v) for v in (sx,sy,sw,sh)) or sw<=0 or sh<=0:
+        raise ValueError('Invalid legacy image dimensions or bounds')
     ids = {}
     def index(n):
         ids.setdefault(n.get('id', ''), 'n%d' % (len(ids) + 1))
