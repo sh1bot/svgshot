@@ -262,7 +262,8 @@ scrolled out of view. By default, offscreen/out-of-window nodes retain structura
 records but their content is redacted. Full Value/Legacy value strings, automation
 IDs, process/window-handle properties, and non-descriptive string properties are
 also redacted. Text comes from UIA visible ranges; selections are intersected with
-those ranges before their text is read. `--include-hidden-content` is an explicit
+those ranges before their text is read. Ranges marked hidden (or mixed hidden/visible)
+by the provider are redacted in the default mode. `--include-hidden-content` is an explicit
 native/live-capture opt-in to the broader content, and its use is recorded in the
 snapshot. Password redaction remains active in both modes.
 

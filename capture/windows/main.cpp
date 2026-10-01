@@ -1,6 +1,7 @@
 // UI Automation + Windows Graphics Capture + WIC PNG, with vendored miniz.
 #include <windows.h>
 #include <ole2.h>
+#include <richedit.h>
 #include <UIAutomation.h>
 #include <algorithm>
 #include <chrono>
@@ -107,6 +108,9 @@ template <typename T> com_ptr<T> pattern(IUIAutomationElement *e, PATTERNID id)
 
 std::string range_details(IUIAutomationTextRange *range, UiaData &data)
 {
+    if (data.hidden_text(range))
+        return "{\"text\":\"\",\"rectangles\":[],\"status\":\"redacted\",\"reason\":\"hidden_"
+               "text\"}";
     std::ostringstream out;
     BSTR raw = nullptr;
     HRESULT hr = range->GetText(65537, &raw);
@@ -365,6 +369,18 @@ std::string text_ranges(IUIAutomationElement *e, UiaData &data, std::string &sta
             if (cmp > 0)
                 clipped->MoveEndpointByRange(TextPatternRangeEndpoint_End, visible.get(),
                                              TextPatternRangeEndpoint_End);
+            if (data.hidden_text(clipped.get()))
+            {
+                if (comma)
+                    out << ',';
+                comma = true;
+                out << "{\"text\":\"\",\"rectangles\":[],\"status\":\"redacted\",\"reason\":"
+                       "\"hidden_text\"}";
+                int moved = 0;
+                if (FAILED(line->Move(TextUnit_Line, 1, &moved)) || moved == 0)
+                    break;
+                continue;
+            }
             BSTR raw = nullptr;
             HRESULT text_hr = clipped->GetText(65537, &raw);
             if (FAILED(text_hr))
@@ -442,6 +458,7 @@ struct Reader
                                        IID_PPV_ARGS(automation.put())));
         check_hresult(automation->get_RawViewWalker(walker.put()));
         data = std::make_unique<UiaData>(automation.get());
+        data->include_hidden_content = include_hidden;
     }
     std::string node(IUIAutomationElement *e, int depth = 0)
     {
@@ -940,9 +957,16 @@ int fixture()
                   WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD, 20, 165, 300, 30, hwnd, nullptr,
                   wc.hInstance, nullptr);
     LoadLibraryW(L"Msftedit.dll");
-    CreateWindowW(L"RICHEDIT50W", L"Formatted visible text",
-                  WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE, 20, 205, 300, 40, hwnd, nullptr,
-                  wc.hInstance, nullptr);
+    HWND rich = CreateWindowW(L"RICHEDIT50W", L"Formatted visible text HiddenTextSentinel",
+                              WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE, 20, 205, 300, 40,
+                              hwnd, nullptr, wc.hInstance, nullptr);
+    CHARFORMAT2W hidden_format{};
+    hidden_format.cbSize = sizeof(hidden_format);
+    hidden_format.dwMask = CFM_HIDDEN;
+    hidden_format.dwEffects = CFE_HIDDEN;
+    SendMessageW(rich, EM_SETSEL, 23, -1);
+    SendMessageW(rich, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&hidden_format));
+    SendMessageW(rich, EM_SETSEL, 0, 0);
     // Neither of these sentinel values is visible in the bitmap.
     CreateWindowW(L"EDIT", L"HiddenValueSentinel", WS_CHILD, 20, 10, 100, 20, hwnd, nullptr,
                   wc.hInstance, nullptr);

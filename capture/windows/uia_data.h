@@ -10,6 +10,7 @@ struct UiaData
     std::vector<int> properties, patterns;
     std::string property_names = "{", pattern_names = "{";
     bool text_truncated = false;
+    bool include_hidden_content = false;
     explicit UiaData(IUIAutomation *a) : automation(a)
     {
         auto registry = [&](int first, int last, auto getter, auto &ids, auto &names) {
@@ -267,6 +268,18 @@ struct UiaData
                        : std::string("{\"status\":\"") + (p ? "supported\"}" : "not_supported\"}");
         }
         return out + '}';
+    }
+    bool hidden_text(IUIAutomationTextRange *range)
+    {
+        if (include_hidden_content)
+            return false;
+        VARIANT v;
+        VariantInit(&v);
+        HRESULT hr = range->GetAttributeValue(UIA_IsHiddenAttributeId, &v);
+        bool hidden = SUCCEEDED(hr) && ((v.vt == VT_BOOL && v.boolVal != VARIANT_FALSE) ||
+                                        value(v) == "{\"status\":\"mixed\"}");
+        VariantClear(&v);
+        return hidden;
     }
     std::string attributes(IUIAutomationTextRange *range)
     {
