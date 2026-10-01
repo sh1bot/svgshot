@@ -1,6 +1,7 @@
 import re
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -15,7 +16,8 @@ from svgshot.recognize import (Options, _blue_window_surfaces,
                                _embedded_panels, _focused_controls, _disabled_buttons,
                                _footer_surface,
                                _multicolor_marks, _window_close_controls,
-                               _window_shell,
+                               _window_shell, _refine_ambiguous_text,
+                               _covered_small_fragment,
                                reconstruct)
 from svgshot.svg import to_svg
 from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
@@ -23,6 +25,21 @@ from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
 
 
 class PipelineTest(unittest.TestCase):
+    def test_ambiguous_ocr_is_retried_as_a_local_label(self):
+        source = Image.new("RGB", (100, 60), "white")
+        text = Node("text", (20, 20, 40, 9), text="see.", confidence=.55)
+        local = Node("text", (8, 4, 40, 9), text="Select...", confidence=.92)
+        with patch("svgshot.recognize._ocr_ui", return_value=[local]):
+            _refine_ambiguous_text(source, [text], "eng")
+        self.assertEqual(text.text, "Select...")
+        self.assertEqual(text.box, (20, 20, 40, 9))
+        self.assertEqual(text.confidence, .92)
+
+    def test_selected_row_ocr_suppresses_overlapping_fragment(self):
+        fragment = Node("text", (66, 135, 10, 6), text="ns", confidence=.81)
+        selected = Node("text", (14, 132, 62, 9), text="Permissions", confidence=.96)
+        self.assertTrue(_covered_small_fragment(fragment, [selected]))
+
     def test_thresholded_ocr_recovers_small_dialog_labels(self):
         image=Image.new("RGB",(457,251),"#f0f0f0")
         draw=ImageDraw.Draw(image)

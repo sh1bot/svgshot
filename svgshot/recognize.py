@@ -119,6 +119,42 @@ def _ocr_ui(image: Image.Image, language: str, psm: int = 7) -> list[Node]:
     return _ocr(gray.convert("RGB"), language, psm)
 
 
+def _refine_ambiguous_text(source: Image.Image, texts: list[Node], language: str) -> None:
+    """Retry short, uncertain labels in isolation to avoid full-window OCR noise."""
+    for node in texts:
+        x, y, width, height = node.box
+        if not (.35 <= node.confidence < .72 and 4 <= height <= 22 and
+                2 <= width <= 180 and len(node.text) <= 24):
+            continue
+        pad_x, pad_y = max(2, min(8, width // 5)), max(2, min(6, height // 2))
+        left, top = max(0, x-pad_x), max(0, y-pad_y)
+        right, bottom = min(source.width, x+width+pad_x), min(source.height, y+height+pad_y)
+        candidates = [item for item in _ocr_ui(source.crop((left, top, right, bottom)),
+                                                language, psm=7)
+                      if item.confidence >= max(.68, node.confidence+.12)]
+        if not candidates:
+            continue
+        better = max(candidates, key=lambda item: item.confidence)
+        bx, by, bw, bh = better.box
+        node.text = better.text
+        node.box = (left+bx, top+by, bw, bh)
+        node.confidence = better.confidence
+
+
+def _covered_small_fragment(text: Node, labels: list[Node]) -> bool:
+    """Discard tiny OCR shards already included in a clear selected-row label."""
+    x, y, width, height = text.box
+    area = max(1, width*height)
+    for label in labels:
+        if label.confidence < .7 or len(text.text.strip()) > 4:
+            continue
+        lx, ly, lw, lh = label.box
+        intersection = max(0, min(x+width,lx+lw)-max(x,lx)) * max(0, min(y+height,ly+lh)-max(y,ly))
+        if intersection/area >= .65 and text.text.casefold().strip("|.,'\"") in label.text.casefold():
+            return True
+    return False
+
+
 @lru_cache(maxsize=1)
 def _tesseract_version() -> tuple[int, int]:
     result = subprocess.run(["tesseract", "--version"], capture_output=True,
@@ -1136,6 +1172,9 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                     alternate.box[2] < overlaps[0].box[2]*1.6):
                 texts.remove(overlaps[0])
                 texts.append(alternate)
+        _refine_ambiguous_text(rgb_image, texts, options.language)
+        if focused_text:
+            texts = [text for text in texts if not _covered_small_fragment(text, focused_text)]
         # Sparse full-image OCR can miss short white captions on small blue
         # bars. Read the left end of each bar separately, away from its X.
         for bx,by,bw,bh in _blue_title_bars(pixels):
