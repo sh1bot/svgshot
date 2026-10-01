@@ -1,5 +1,6 @@
 import io
 import json
+from contextlib import redirect_stderr
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 from PIL import Image
 from svgshot.schema import render_view, validate
 from svgshot.snapshot import embed_snapshot,read_snapshot
-from svgshot.convert import main
+from svgshot.cli import main
 
 
 def semantic_capture():
@@ -51,7 +52,7 @@ class UnifiedSchemaTests(unittest.TestCase):
         self.assertEqual(read_snapshot(io.BytesIO(embed_snapshot(png,s))),s)
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);stored=root/'input.png';stored.write_bytes(png)
-            with patch('svgshot.convert.capture_bytes',return_value=png) as capture_helper:
+            with patch('svgshot.cli.capture_bytes',return_value=png) as capture_helper:
                 self.assertEqual(main([str(stored),str(root/'saved.svg'),'--no-ocr']),0)
                 capture_helper.assert_not_called()
                 self.assertEqual(main(['--capture',str(root/'direct.svg'),'--no-ocr']),0)
@@ -59,3 +60,19 @@ class UnifiedSchemaTests(unittest.TestCase):
             self.assertEqual((root/'saved.svg').read_bytes(),(root/'direct.svg').read_bytes())
             self.assertEqual(sorted(p.name for p in root.iterdir()),['direct.svg','input.png','saved.svg'])
             self.assertIn('svgshot.capture',(root/'direct.svg').read_text())
+
+    def test_png_without_semantics_warns_and_uses_pixel_analysis(self):
+        image=Image.new('RGB',(8,8),'white')
+        stream=io.BytesIO();image.save(stream,format='PNG')
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source=root/'plain.png';output=root/'plain.svg'
+            source.write_bytes(stream.getvalue())
+            stderr=io.StringIO()
+            with patch('svgshot.cli.reconstruct',return_value=object()) as analyze, \
+                 patch('svgshot.cli.to_svg',return_value='<svg/>') as render, \
+                 redirect_stderr(stderr):
+                self.assertEqual(main([str(source),str(output),'--no-ocr']),0)
+            analyze.assert_called_once()
+            render.assert_called_once()
+            self.assertEqual(output.read_text(),'<svg/>')
+            self.assertIn('no embedded semantic data',stderr.getvalue())

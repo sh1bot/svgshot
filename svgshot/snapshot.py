@@ -22,6 +22,10 @@ MAX_JSON = 64 * 1024 * 1024
 MAX_CHUNK = 16 * 1024 * 1024
 
 
+class MissingSnapshotError(ValueError):
+    """A valid PNG did not contain an embedded semantic snapshot."""
+
+
 def encode_snapshot(snapshot):
     validate(snapshot)
     raw = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
@@ -92,7 +96,7 @@ def read_snapshot(path):
             raise ValueError("PNG has multiple seMA snapshots")
         data = chunk
     if data is None:
-        raise ValueError("PNG has no embedded seMA semantic snapshot")
+        raise MissingSnapshotError("PNG has no embedded seMA semantic snapshot")
     return decode_snapshot(data)
 
 

@@ -25,28 +25,32 @@ rendered comparison reports.
 svgshot screenshot.png screenshot.svg
 ```
 
-To save a recognition report, add `--report report.json` (requires Inkscape).
-Use `--no-ocr` to omit reconstructed text. Conversion can also produce an
-accessible HTML outline:
+`svgshot` checks for accessibility data embedded in the PNG. When it finds the
+data, it uses that to create semantic SVG and can also write an accessible HTML
+outline:
 
 ```sh
-svgshot-convert screenshot.png screenshot.svg --html screenshot.html
+svgshot screenshot.png screenshot.svg --html screenshot.html
 ```
 
-## Capture and convert
+PNG screenshots without embedded data produce a warning and are converted using
+image analysis and OCR. Use `--no-ocr` to omit reconstructed text. To save a
+recognition report, add `--report report.json` (requires Inkscape).
+
+## Capture
 
 A capture PNG stores the screenshot and its semantic accessibility data together.
 Keep the PNG as a reusable source, then convert it when needed:
 
 ```sh
 svgshot-grab corpus/window.png
-svgshot-convert corpus/window.png window.svg --html window.html
+svgshot corpus/window.png window.svg --html window.html
 ```
 
 Or capture and convert directly without saving an intermediate PNG:
 
 ```sh
-svgshot-convert --capture window.svg --html window.html
+svgshot --capture window.svg --html window.html
 ```
 
 The capture executable is native on Windows, macOS and Linux. Download one from
@@ -72,12 +76,8 @@ captures do not preserve interaction or live announcements.
 
 Complex layouts, small text and custom artwork may be simplified or missed.
 Unrecognized image details may remain as PNG regions. Use `--no-raster` to omit
-those details in the pixel-only `svgshot` command. The semantic converter keeps
-extra raster detail off by default; `--allow-raster` opts in. Inspect the output
-at its intended size before relying on it.
-
-For a pixel-only SVG without captured accessibility data, `svgshot` also accepts
-any PNG screenshot directly. The PNG is not modified.
+them, or `--allow-raster` to retain additional image detail in semantic output.
+Inspect the SVG at its intended size before relying on it.
 
 ## Capture data
 
