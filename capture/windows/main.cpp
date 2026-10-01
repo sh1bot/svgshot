@@ -871,8 +871,8 @@ int fixture()
                       75, 220, 30, hwnd, nullptr, wc.hInstance, nullptr);
     SendMessageW(check, BM_SETCHECK, BST_CHECKED, 0);
     CreateWindowW(L"EDIT", L"Exact text: <SVG> & UIA",
-                  WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 20, 120, 300, 30, hwnd,
-                  nullptr, wc.hInstance, nullptr);
+                  WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_MULTILINE, 20, 120, 300,
+                  30, hwnd, nullptr, wc.hInstance, nullptr);
     CreateWindowW(L"EDIT", L"PasswordHiddenSentinel",
                   WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD, 20, 165, 300, 30, hwnd, nullptr,
                   wc.hInstance, nullptr);
