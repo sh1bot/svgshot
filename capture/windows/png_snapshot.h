@@ -27,6 +27,7 @@ void embed_snapshot(const std::filesystem::path &path, const std::string &snapsh
         throw std::runtime_error("Compressed UIA snapshot exceeds 16 MiB");
     std::ifstream input(path, std::ios::binary);
     std::string png((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    input.close();
     const std::string signature("\x89PNG\r\n\x1a\n", 8);
     const std::string end("\0\0\0\0IEND\xae\x42\x60\x82", 12);
     if (png.size() < 20 || png.substr(0, 8) != signature || png.substr(png.size() - 12) != end)
@@ -54,7 +55,9 @@ void embed_snapshot(const std::filesystem::path &path, const std::string &snapsh
     if (!MoveFileExW(temporary.c_str(), path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     {
+        auto error = GetLastError();
         std::filesystem::remove(temporary);
-        throw std::runtime_error("Cannot replace capture with embedded PNG");
+        throw std::runtime_error("Cannot replace capture with embedded PNG (Windows error " +
+                                 std::to_string(error) + ")");
     }
 }
