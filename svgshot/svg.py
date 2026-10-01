@@ -25,6 +25,8 @@ def _contrast(foreground: str, background: str, minimum=4.4) -> str:
 
 
 def resolved_family(family: str) -> str:
+    if family == "monospace":
+        return "Consolas" if Path("C:/Windows/Fonts/consola.ttf").is_file() else "DejaVu Sans Mono"
     if family == "auto":
         return "Segoe UI" if Path("C:/Windows/Fonts/segoeui.ttf").is_file() else "Arial"
     return family
@@ -33,7 +35,7 @@ def resolved_family(family: str) -> str:
 @lru_cache(maxsize=16)
 def _font(family: str):
     family = resolved_family(family)
-    windows = {"Segoe UI": "segoeui.ttf", "Arial": "arial.ttf"}
+    windows = {"Segoe UI": "segoeui.ttf", "Arial": "arial.ttf", "Consolas": "consola.ttf"}
     candidates = [Path("C:/Windows/Fonts") / windows.get(family, "")]
     try:
         match = subprocess.run(["fc-match", family, "-f", "%{file}"],
@@ -120,13 +122,17 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             if node.vector_data.get("role") not in ("selected-text","disabled-text"):
                 paint = _contrast(paint, surface_at(node, surface),
                                   3 if node.vector_data.get("role")=="link" else 4.4)
-            size, baseline = text_layout(node, font_family)
+            text_family = node.vector_data.get("font_family", font_family)
+            fallback_family = "monospace" if text_family == "monospace" else "sans-serif"
+            size, baseline = text_layout(node, text_family)
+            size = node.vector_data.get("font_size", size)
+            baseline = node.vector_data.get("baseline", baseline)
             weight = ' font-weight="600"' if 14.5 <= size < 22 and len(node.text) < 30 else ""
             if "font_weight" in node.vector_data:
                 weight = f' font-weight="{int(node.vector_data["font_weight"])}"'
             parts.append(f'<text x="{x}" y="{baseline:g}" fill="{paint}" '
-                         f'font-family="{escape(resolved_family(font_family), quote=True)},sans-serif" font-size="{size:g}"'
-                         f' textLength="{w}" lengthAdjust="spacingAndGlyphs"{weight}>'
+                         f'font-family="{escape(resolved_family(text_family), quote=True)},{fallback_family}" font-size="{size:g}"'
+                         f' xml:space="preserve" textLength="{w}" lengthAdjust="spacingAndGlyphs"{weight}>'
                          f'{escape(node.text)}</text>')
         elif kind in ("circle", "ring", "radio", "radio-selected"):
             radius = min(w,h)/2 - .75

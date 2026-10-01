@@ -143,6 +143,51 @@ class CaptureTests(unittest.TestCase):
             self.assertGreater(rendered.getpixel((5,5))[0], 240)
             self.assertLess(rendered.getpixel((5,5))[2], 50)
 
+    def test_terminal_grid_spacing_colours_and_blank_lines(self):
+        from PIL import ImageDraw
+        s = snapshot()
+        terminal = element(50020, 'Terminal', [110, 240, 240, 100], class_name='TermControl', framework_id='XAML')
+        terminal['text_ranges'] = [
+            {'text': 'AB  CD' + ' '*14, 'rectangles': [[110, 240, 240, 30]]},
+            {'text': ' '*20, 'rectangles': [[110, 270, 240, 30]]},
+            {'text': 'E' + ' '*19, 'rectangles': [[110, 300, 240, 30]]},
+        ]
+        s['root']['children'] = [terminal]
+        image = Image.new('RGB', (300, 180), '#002050')
+        draw = ImageDraw.Draw(image)
+        for x in (10, 22):
+            draw.rectangle((x+3, 45, x+8, 60), fill='#00ff00')
+        for x in (58, 70):
+            draw.rectangle((x+3, 45, x+8, 60), fill='#ffff00')
+        scene = Node('root', (0, 0, 300, 180), children=[Node('text', (10, 40, 200, 16), text='OCR duplicate')])
+        merge_uia(scene, image, s)
+        texts = [n for n in flatten(scene) if n.kind == 'text']
+        self.assertEqual(''.join(n.text for n in texts), 'AB  CDE')
+        self.assertEqual([n.box[0] for n in texts], [10, 58, 10])
+        self.assertEqual([n.box[1] for n in texts], [40, 40, 100])
+        self.assertEqual([n.box[2] for n in texts], [48, 24, 12])
+        self.assertEqual([n.color for n in texts[:2]], ['#00ff00', '#ffff00'])
+        svg = semantic_svg(scene, s)
+        doc = ET.fromstring(svg)
+        visible = doc.findall('.//{http://www.w3.org/2000/svg}text')
+        self.assertTrue(all(n.get('font-size') == '24' for n in visible))
+        self.assertTrue(all(n.get('{http://www.w3.org/XML/1998/namespace}space') == 'preserve' for n in visible))
+        self.assertTrue(all('Mono' in n.get('font-family') or 'Consolas' in n.get('font-family') for n in visible))
+        self.assertIn('AB  CD' + ' '*14, svg)
+
+    def test_clipped_xaml_caption_keeps_full_semantic_name(self):
+        from PIL import ImageDraw
+        s = snapshot()
+        name = 'A very long tab label that is clipped'
+        s['root']['children'] = [element(50020, name, [120, 220, 70, 24], framework_id='XAML')]
+        image = Image.new('RGB', (300, 180), 'white')
+        ImageDraw.Draw(image).rectangle((20, 25, 89, 38), fill='black')
+        scene = merge_uia(Node('root', (0, 0, 300, 180)), image, s)
+        caption = next(n.text for n in flatten(scene) if n.kind == 'text')
+        self.assertTrue(caption.endswith('…'))
+        self.assertLess(len(caption), len(name))
+        self.assertIn(name, semantic_svg(scene, s))
+
     def test_password_ocr_is_not_emitted(self):
         s = snapshot()
         item = element(50004, 'Password', [120, 225, 90, 30], password=True)

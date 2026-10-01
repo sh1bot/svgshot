@@ -20,7 +20,7 @@ from PIL import Image
 
 from .model import Node, flatten
 from .recognize import Options, reconstruct
-from .svg import to_svg
+from .svg import to_svg, _font
 
 TYPES = dict(enumerate((
     "button", "calendar", "checkbox", "combobox", "edit", "hyperlink", "image",
@@ -171,6 +171,45 @@ def ink_box(image, box):
     return None
 
 
+def terminal_text(image, item, snapshot):
+    """Keep UIA's fixed character cells; sample bitmap colours, never OCR words."""
+    import numpy as np
+    nodes = []
+    for line in item.get("text_ranges", []):
+        rects = line.get("rectangles", [])
+        text = line.get("text", "").rstrip("\r\n")
+        if len(rects) != 1 or not text.strip():
+            continue
+        box = local_box(rects[0], snapshot)
+        if not box:
+            continue
+        x, y, width, height = box
+        cell = width / len(text)
+        pixels = np.asarray(image.crop((x, y, x+width, y+height)).convert("RGB"))
+        background = np.median(pixels.reshape(-1, 3), axis=0)
+        runs = []
+        for index, char in enumerate(text.rstrip()):
+            color = runs[-1][2] if runs else (204, 204, 204)
+            if not char.isspace():
+                patch = pixels[:, round(index*cell):round((index+1)*cell)]
+                distance = np.max(np.abs(patch.astype(float)-background), axis=2)
+                ink = patch[(distance > 60) & (distance >= np.percentile(distance, 80))]
+                if len(ink):
+                    color = tuple(int(v) for v in np.median(ink, axis=0))
+            if runs and max(abs(a-b) for a, b in zip(color, runs[-1][2])) < 35:
+                runs[-1][1] += char
+            else:
+                runs.append([index, char, color])
+        for start, content, color in runs:
+            left, right = round(x+start*cell), round(x+(start+len(content))*cell)
+            nodes.append(Node("text", (left, y, right-left, height), text=content,
+                              color="#%02x%02x%02x" % color,
+                              vector_data={"source": "uia", "uia_id": item.get("id", ""),
+                                           "font_family": "monospace", "font_weight": 400,
+                                           "font_size": height*.8, "baseline": y+height*.8}))
+    return nodes
+
+
 def merge_uia(scene, image, snapshot):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
@@ -185,15 +224,21 @@ def merge_uia(scene, image, snapshot):
     suppressed = {id(n) for n in ocr if any(contains(b, n.box) for b in chrome_boxes)}
     controls, text_nodes, artwork = [], [], []
     text_boxes = [local_box(n["bounds"], snapshot) for n in items if kind(n) == "text"]
+    terminals = {id(n) for n in items if n.get("class_name") == "TermControl"}
     authoritative = [local_box(n["bounds"], snapshot) for n in items
-                     if kind(n) in {"list", "tree", "appbar", "tab", "header", "statusbar"}
+                     if id(n) in terminals or kind(n) in {"list", "tree", "appbar", "tab", "header", "statusbar"}
                      or kind(n) == "edit" and n.get("framework_id") == "XAML"]
     surfaces = []
     for item in items:
-        if kind(item) in {"pane", "list", "tree", "appbar", "tab", "header", "statusbar"}:
+        if id(item) in terminals or kind(item) in {"pane", "list", "tree", "appbar", "tab", "tabitem", "header", "statusbar"}:
             b = local_box(item["bounds"], snapshot)
             if b[2]*b[3] > 4000:
                 surfaces.append(Node("rect", b, color=sample_color(image, b)))
+    if terminals:
+        top = min(local_box(n["bounds"], snapshot)[1] for n in items if id(n) in terminals)
+        if top > 0:
+            header = (0, 0, image.width, top)
+            surfaces.append(Node("rect", header, color=sample_color(image, header)))
     surfaces.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
     cells = {id(child) for item in items if kind(item) in {"listitem", "dataitem"}
              for child in walk(item) if kind(child) == "edit"}
@@ -223,6 +268,17 @@ def merge_uia(scene, image, snapshot):
             height = min(14, max(7, h-4))
             width = min(max(1, w-8), max(8, round(len(text)*height*.52)))
             ink = (x+(w-width)//2 if centered else x, y+(h-height)//2, width, height)
+        # A TextBlock can expose its full name even when the visible label clips.
+        # Use an ellipsis in the visual layer; the semantic tree keeps the full name.
+        if kind(owner) == "text" and owner.get("framework_id") == "XAML":
+            font = _font("auto")
+            if font:
+                _, top, _, bottom = font.getbbox(text, anchor="ls")
+                size = ink[3]*100/max(1, bottom-top)
+                if font.getlength(text)*size/100 > ink[2]*1.2:
+                    while text and font.getlength(text+"…")*size/100 > ink[2]:
+                        text = text[:-1]
+                    text += "…"
         signature = (text, ink)
         if signature in emitted:
             return
@@ -266,6 +322,9 @@ def merge_uia(scene, image, snapshot):
                 visual_box = box
             controls.append(Node(shape, visual_box, color="#505050", background=sample_color(image, visual_box),
                                  vector_data={"source": "uia", "uia_id": item.get("id", "")}))
+        if id(item) in terminals:
+            text_nodes.extend(terminal_text(image, item, snapshot))
+            continue
         ranges = item.get("text_ranges", [])
         if ranges:
             for line in ranges:
@@ -368,8 +427,8 @@ def merge_uia(scene, image, snapshot):
     # Insert outlines after underlying panels; to_svg puts root text above them.
     surface_kinds = {"content-panel", "dialog-panel", "window-header", "footer-panel", "rect", "decorative-background", "selected-row", "text-selection"}
     controls.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
-    scene.children = (surfaces + [n for n in scene.children if n.kind in surface_kinds and
-                                   not any(contains(b, n.box) for b in authoritative)] + controls
+    scene.children = ([n for n in scene.children if n.kind in surface_kinds and
+                                   not any(contains(b, n.box) for b in authoritative)] + surfaces + controls
                       + [n for n in scene.children if n.kind not in surface_kinds] + artwork + text_nodes)
     return scene
 

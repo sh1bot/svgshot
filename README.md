@@ -231,6 +231,9 @@ python -m svgshot.capture revised.svg --image capture.png --uia capture.uia.json
 ```
 
 `--no-ocr` works without Tesseract and uses UIA captions/text plus vector geometry.
+Windows Terminal text uses its UIA character grid with a monospace font, uniform
+line height, preserved spaces, and colours sampled from the PNG. Clipped XAML
+labels use a visual ellipsis while retaining their full accessible names.
 UIA strings take precedence over overlapping OCR; OCR helps fit text into its
 visible ink bounds and supplies labels absent from UIA. UIA image and container
 names remain semantic descriptions rather than invented visible captions.
