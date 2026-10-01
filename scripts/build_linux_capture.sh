@@ -17,7 +17,10 @@ apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
   cmake make pkg-config git "$compiler" "libatspi2.0-dev:$deb_arch" \
   "libx11-dev:$deb_arch" "libpng-dev:$deb_arch" "libjson-c-dev:$deb_arch" "zlib1g-dev:$deb_arch"
 git config --global --add safe.directory /src
-export PKG_CONFIG_LIBDIR="/usr/lib/$triple/pkgconfig:/usr/share/pkgconfig"
+pkg_triple=$triple
+# Debian i386 library directories differ from the i686 compiler target name.
+if [ "$deb_arch" = i386 ]; then pkg_triple=i386-linux-gnu; fi
+export PKG_CONFIG_LIBDIR="/usr/lib/$pkg_triple/pkgconfig:/usr/share/pkgconfig"
 cmake -S capture/linux -B "build/linux-$target_arch" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_CXX_COMPILER="$triple-g++" \

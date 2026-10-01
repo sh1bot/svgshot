@@ -319,10 +319,10 @@ struct Reader {
           warnings.insert("Visible text truncated at 2000 ranges");
         }
         for (guint i = 0; i < std::min(ranges->len, 2000u); i++) {
-          auto *range = g_array_index(ranges, AtspiTextRange *, i);
-          if (!range)
-            continue;
-          int begin = range->start_offset, end = range->end_offset;
+          // libatspi's D-Bus demarshaller stores these structs inline, despite
+          // older API prose describing a list of pointers.
+          const auto &range = g_array_index(ranges, AtspiTextRange, i);
+          int begin = range.start_offset, end = range.end_offset;
           if (begin < 0 || end < begin)
             throw std::runtime_error("text offsets");
           if (end - begin > 65536) {
@@ -383,9 +383,7 @@ struct Reader {
     }
     if (ranges) {
       for (guint i = 0; i < ranges->len; i++) {
-        auto *r = g_array_index(ranges, AtspiTextRange *, i);
-        if (r)
-          g_boxed_free(ATSPI_TYPE_TEXT_RANGE, r);
+        g_free(g_array_index(ranges, AtspiTextRange, i).content);
       }
       g_array_free(ranges, TRUE);
     }
