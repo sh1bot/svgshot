@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import math
 import os
 import shutil
@@ -22,6 +23,7 @@ from .model import Node, flatten
 from .recognize import Options, reconstruct
 from .svg import to_svg, _font
 from .snapshot import read_snapshot
+from .schema import render_view
 
 TYPES = dict(enumerate((
     "button", "calendar", "checkbox", "combobox", "edit", "hyperlink", "image",
@@ -44,10 +46,11 @@ def walk(root):
 
 
 def kind(item):
-    return TYPES.get(item.get("control_type"), "custom")
+    return item.get("role") or TYPES.get(item.get("control_type"), "custom")
 
 
 def validate_snapshot(snapshot, image):
+    snapshot = render_view(snapshot)
     if snapshot.get("version") not in (1, 2) or not isinstance(snapshot.get("root"), dict):
         raise ValueError("Unsupported or incomplete UIA snapshot")
     bounds = snapshot.get("screen_bounds", [])
@@ -197,7 +200,12 @@ def terminal_text(image, item, snapshot):
         cell = width / len(text)
         pixels = np.asarray(image.crop((x, y, x+width, y+height)).convert("RGB"))
         background = np.median(pixels.reshape(-1, 3), axis=0)
-        foregrounds = [uia_foreground(line.get("attributes", {}))] * len(text)
+        def foreground(r):
+            color = r.get("style", {}).get("foreground")
+            if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+                return tuple(int(color[i:i+2], 16) for i in (1, 3, 5))
+            return uia_foreground(r.get("attributes", {}))
+        foregrounds = [foreground(line)] * len(text)
         offset = 0
         for run in line.get("format_runs", {}).get("ranges", []):
             content = run.get("text", "").rstrip("\r\n")
@@ -207,9 +215,9 @@ def terminal_text(image, item, snapshot):
             if start < 0:
                 continue
             offset = start + len(content)
-            foreground = uia_foreground(run.get("attributes", {}))
-            if foreground is not None:
-                foregrounds[start:offset] = [foreground] * len(content)
+            run_color = foreground(run)
+            if run_color is not None:
+                foregrounds[start:offset] = [run_color] * len(content)
         runs = []
         for index, char in enumerate(text.rstrip()):
             semantic_color = foregrounds[index]
@@ -241,6 +249,7 @@ def merge_uia(scene, image, snapshot):
     Keep semantic names separate from visible captions: image and container
     names are not painted as text. The original UIA tree is retained unchanged.
     """
+    snapshot = render_view(snapshot)
     items = list(visible_items(snapshot["root"], snapshot))
     chrome = {id(child) for item in items if kind(item) == "titlebar"
               for child in walk(item) if child is not item}
@@ -480,13 +489,15 @@ def describe(item):
         pieces.append("read only")
     if item.get("keyboard_focus"):
         pieces.append("focused")
-    for key in ("help_text", "access_key", "accelerator_key"):
+    for key in ("description", "help_text", "access_key", "accelerator_key"):
         if item.get(key):
             pieces.append(item[key])
     return ", ".join(str(s) for s in pieces if s)
 
 
 def semantic_svg(scene, snapshot, font_family="auto"):
+    original = snapshot
+    snapshot = render_view(snapshot)
     visual = to_svg(scene, font_family)
     start, body = visual.split(">", 1)
     title = snapshot["root"].get("name") or "Window capture"
@@ -494,7 +505,7 @@ def semantic_svg(scene, snapshot, font_family="auto"):
     start = start.replace('role="img"', 'role="graphics-document group" aria-labelledby="capture-title" aria-describedby="capture-description"')
     parts = [start+">", f'<title id="capture-title">{escape(title)}</title>',
              '<desc id="capture-description">Static window capture. Represented controls are informational and cannot be operated.</desc>',
-             '<metadata id="uia-snapshot">'+escape(json.dumps(snapshot, ensure_ascii=False))+'</metadata>',
+             '<metadata id="uia-snapshot">'+escape(json.dumps(original, ensure_ascii=False))+'</metadata>',
              '<g aria-hidden="true" data-kind="visual-reconstruction">', body.rsplit("</svg>", 1)[0]]
     for node in flatten(scene):
         if node.kind == "capture-artwork":
@@ -540,6 +551,7 @@ def semantic_svg(scene, snapshot, font_family="auto"):
 
 
 def accessible_html(svg, snapshot):
+    snapshot = render_view(snapshot)
     def outline(item):
         if not isinstance(item, dict) or item.get("offscreen"):
             return ""

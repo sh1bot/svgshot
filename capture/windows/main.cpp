@@ -5,6 +5,10 @@
 #include <UIAutomation.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <fcntl.h>
+#include <io.h>
 #include <condition_variable>
 #include <d3d11.h>
 #include <dwmapi.h>
@@ -24,6 +28,7 @@
 #include <winrt/Windows.Graphics.Capture.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <winrt/Windows.Graphics.DirectX.h>
+#include "unified_snapshot.h"
 using winrt::check_hresult;
 using winrt::com_ptr;
 namespace capture = winrt::Windows::Graphics::Capture;
@@ -823,14 +828,13 @@ HWND pick_window()
         SetForegroundWindow(previous);
     return p.selected;
 }
-void save_png(const std::wstring &path, UINT width, UINT height, UINT stride, BYTE *pixels)
+std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
 {
     com_ptr<IWICImagingFactory> factory;
     check_hresult(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                    IID_PPV_ARGS(factory.put())));
-    com_ptr<IWICStream> stream;
-    check_hresult(factory->CreateStream(stream.put()));
-    check_hresult(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
+    com_ptr<IStream> stream;
+    check_hresult(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()));
     com_ptr<IWICBitmapEncoder> encoder;
     check_hresult(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, encoder.put()));
     check_hresult(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache));
@@ -845,8 +849,14 @@ void save_png(const std::wstring &path, UINT width, UINT height, UINT stride, BY
     check_hresult(frame->WritePixels(height, stride, stride * height, pixels));
     check_hresult(frame->Commit());
     check_hresult(encoder->Commit());
+    STATSTG stat{}; check_hresult(stream->Stat(&stat, STATFLAG_NONAME));
+    std::string png(static_cast<size_t>(stat.cbSize.QuadPart), '\0');
+    LARGE_INTEGER zero{}; check_hresult(stream->Seek(zero, STREAM_SEEK_SET, nullptr));
+    ULONG read=0; check_hresult(stream->Read(png.data(), static_cast<ULONG>(png.size()), &read));
+    if(read!=png.size()) throw std::runtime_error("Cannot read PNG memory stream");
+    return png;
 }
-SIZE capture_png(HWND hwnd, const std::wstring &path)
+SIZE capture_png(HWND hwnd, std::string &png)
 {
     if (!capture::GraphicsCaptureSession::IsSupported())
         throw std::runtime_error("Windows Graphics Capture is unavailable on this desktop");
@@ -934,7 +944,7 @@ SIZE capture_png(HWND hwnd, const std::wstring &path)
     check_hresult(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
     try
     {
-        save_png(path, size.Width, size.Height, mapped.RowPitch, static_cast<BYTE *>(mapped.pData));
+        png = save_png(size.Width, size.Height, mapped.RowPitch, static_cast<BYTE *>(mapped.pData));
     }
     catch (...)
     {
@@ -1011,7 +1021,7 @@ int wmain(int argc, wchar_t **argv)
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         HWND hwnd = nullptr;
         std::wstring prefix;
-        bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false;
+        bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false, stdoutPng = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -1028,6 +1038,8 @@ int wmain(int argc, wchar_t **argv)
                 delay = std::stoi(argv[++i]);
             else if (arg == L"--include-hidden-content")
                 includeHidden = true;
+            else if (arg == L"--stdout")
+                stdoutPng = true;
             else if (arg == L"--json")
                 jsonExport = true;
             else if (arg == L"--uia-only")
@@ -1044,8 +1056,10 @@ int wmain(int argc, wchar_t **argv)
             else
                 throw std::runtime_error("Unknown or incomplete option");
         }
-        if (prefix.empty())
-            throw std::runtime_error("--out PREFIX is required");
+        if (prefix.empty() && !stdoutPng)
+            throw std::runtime_error("--out PREFIX or --stdout is required");
+        if (stdoutPng && (!prefix.empty() || jsonExport || uiaOnly))
+            throw std::runtime_error("--stdout cannot be combined with file output options");
         if (delay < 0 || delay > 60)
             throw std::runtime_error("Delay must be between 0 and 60 seconds");
         if (hwnd && foreground)
@@ -1058,7 +1072,7 @@ int wmain(int argc, wchar_t **argv)
             hwnd = pick_window();
         if (!hwnd)
         {
-            std::cout << "Capture cancelled\n";
+            std::cerr << "Capture cancelled\n";
             return 2;
         }
         if (!IsWindow(hwnd) || IsIconic(hwnd))
@@ -1066,8 +1080,9 @@ int wmain(int argc, wchar_t **argv)
         RECT before = bounds(hwnd);
         auto snapshot = read_uia(hwnd, includeHidden);
         SIZE size{before.right - before.left, before.bottom - before.top};
+        std::string png;
         if (!uiaOnly)
-            size = capture_png(hwnd, prefix + L".png");
+            size = capture_png(hwnd, png);
         RECT after = bounds(hwnd);
         if (!EqualRect(&before, &after))
             throw std::runtime_error("Window moved or resized during capture; try again");
@@ -1113,12 +1128,19 @@ int wmain(int argc, wchar_t **argv)
                "\"password_content\":\"redacted\",\"actions_invoked\":false,\"include_hidden_"
                "content\":"
             << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
-        if (!uiaOnly)
-            embed_snapshot(std::filesystem::path(prefix + L".png"), out.str());
+        auto normalized = unified::normalize(out.str());
+        if (!uiaOnly) {
+            png = embedded_png(std::move(png), normalized);
+            if(stdoutPng) {
+                _setmode(_fileno(stdout), _O_BINARY);
+                std::cout.write(png.data(), static_cast<std::streamsize>(png.size()));
+                if(!std::cout) throw std::runtime_error("Cannot write PNG to stdout");
+            } else write_capture(std::filesystem::path(prefix + L".png"), png);
+        }
         if (jsonExport || uiaOnly)
         {
             std::ofstream file(std::filesystem::path(prefix + L".uia.json"), std::ios::binary);
-            file << out.str();
+            file << normalized;
             file.close();
             if (!file)
                 throw std::runtime_error("Cannot write UIA JSON export");

@@ -1,0 +1,125 @@
+name: Capture binaries
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - {arch: Win32, name: x86}
+          - {arch: x64, name: x86_64}
+          - {arch: ARM64, name: aarch64}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S capture/windows -B build/capture -A ${{ matrix.arch }}
+      - run: cmake --build build/capture --config Release
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/capture/Release/svgshot-capture-win.exe dist/
+          Copy-Item docs/capture-schema.md dist/
+          Set-Content dist/SOURCE.txt '${{ github.sha }}'
+          Compress-Archive dist/* svgshot-capture-windows-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capture-windows-${{ matrix.name }}
+          path: svgshot-capture-windows-${{ matrix.name }}.zip
+  macos:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native Swift helper
+        run: |
+          mkdir -p dist
+          swiftc -parse-as-library -O -I capture/macos -target ${{ matrix.arch }}-apple-macos14.0 capture/macos/main.swift -o dist/svgshot-capture-macos
+          cp docs/capture-schema.md dist/
+          echo '${{ github.sha }}' > dist/SOURCE.txt
+          file dist/svgshot-capture-macos
+      - name: Smoke native executable
+        if: matrix.arch == 'arm64'
+        run: dist/svgshot-capture-macos --help
+      - run: tar -czf svgshot-capture-macos-${{ matrix.arch }}.tar.gz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capture-macos-${{ matrix.arch }}
+          path: svgshot-capture-macos-${{ matrix.arch }}.tar.gz
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - {arch: x86, cc: i686-linux-gnu-gcc, package: gcc-i686-linux-gnu}
+          - {arch: x86_64, cc: gcc, package: gcc}
+          - {arch: armv7, cc: arm-linux-gnueabihf-gcc, package: gcc-arm-linux-gnueabihf}
+          - {arch: aarch64, cc: aarch64-linux-gnu-gcc, package: gcc-aarch64-linux-gnu}
+          - {arch: riscv64, cc: riscv64-linux-gnu-gcc, package: gcc-riscv64-linux-gnu}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ${{ matrix.package }}
+      - name: Build capture distribution
+        run: |
+          mkdir -p dist
+          ${{ matrix.cc }} -O2 -Wall -Wextra -Werror capture/linux/launcher.c -o dist/svgshot-capture-linux
+          python3 scripts/build_capture_archive.py dist/svgshot-grab.pyz
+          cp docs/capture-schema.md docs/linux-capture.md dist/
+          echo '${{ github.sha }}' > dist/SOURCE.txt
+          file dist/svgshot-capture-linux
+          python3 dist/svgshot-grab.pyz --help
+          tar -czf svgshot-capture-linux-${{ matrix.arch }}.tar.gz -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: capture-linux-${{ matrix.arch }}
+          path: svgshot-capture-linux-${{ matrix.arch }}.tar.gz
+  linux-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y python3-gi python3-pil gir1.2-atspi-2.0 gir1.2-gtk-3.0 at-spi2-core xvfb dbus-x11
+      - run: dbus-run-session -- xvfb-run -a /usr/bin/python3 tests/linux_capture_smoke.py
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [windows, macos, linux, linux-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: capture-latest-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: capture-*
+          merge-multiple: true
+          path: binaries
+      - name: Publish latest-source binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # An older slow matrix must never overwrite a newer main build.
+          current=$(gh api repos/${{ github.repository }}/git/ref/heads/main --jq .object.sha)
+          if [ "$current" != '${{ github.sha }}' ]; then exit 0; fi
+          cat > notes.txt <<'EOF'
+          Capture tools built from commit ${{ github.sha }}.
+          Windows: x86, x86-64, ARM64. macOS 14+: x86-64, ARM64.
+          Linux glibc: x86, x86-64, ARMv7 hard-float, ARM64, RISC-V64.
+          Linux binaries are launchers with a bundled capture zipapp; install Python 3.10+, PyGObject, AT-SPI2 and Pillow from your distribution. Automatic pixels on X11; explicit window bitmap pairing on Wayland. See the included documentation.
+          Current Windows SDK capture builds and macOS do not support ARM32/macOS 32-bit targets.
+          EOF
+          if gh release view capture-latest >/dev/null 2>&1; then
+            gh release edit capture-latest --target '${{ github.sha }}' --title 'Latest capture tools' --notes-file notes.txt
+          else
+            gh release create capture-latest --target '${{ github.sha }}' --title 'Latest capture tools' --notes-file notes.txt --prerelease
+          fi
+          # Move the rolling tag as well as the release target.
+          gh api --method PATCH repos/${{ github.repository }}/git/refs/tags/capture-latest -f sha='${{ github.sha }}' -F force=true
+          gh release upload capture-latest binaries/* --clobber

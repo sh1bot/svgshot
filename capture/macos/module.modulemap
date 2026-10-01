@@ -1,0 +1,5 @@
+module CZlib [system] {
+  header "zlib_bridge.h"
+  link "z"
+  export *
+}

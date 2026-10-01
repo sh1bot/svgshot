@@ -171,164 +171,132 @@ manifests alongside generated fixtures for real-world coverage.
 - The generated SVG is an approximation. Font substitutions change line width;
   the output does not reflow labels or infer invisible accessibility metadata.
 
-## Semantic window capture (Windows)
+## Semantic capture: store first or convert directly
 
-A **separate capture tool** combines a native Windows SDK helper with the existing
-Python reconstructor. Point at a window and click to capture it; Esc cancels.
-The helper reads UI Automation (UIA) and saves the window through Windows
-Graphics Capture. Python renders UIA text and control states first, using OCR
-and the existing simplified vector artwork for details UIA does not expose.
-Small raster fallback is **off by default** in this tool; `--allow-raster` opts in.
-The ordinary PNG conversion command retains its existing behavior.
+Capture and SVG conversion are separate tools. The PNG is the reusable corpus
+entry: pixels plus a compressed, versioned semantic snapshot.
 
-The helper is C++20 using the Windows SDK and a bundled miniz compression encoder.
-Building requires no extra library installation or download. Live capture requires
-Windows 10 version 1903 or later, a desktop supporting Windows Graphics Capture,
-and a non-minimized target window. Install Visual Studio's **Desktop development
-with C++** workload, a Windows 10/11 SDK, and CMake. From the repository root,
-build for your machine (use `ARM64` on Windows on ARM, `x64` on Intel/AMD):
+```sh
+python -m svgshot.grab corpus/window.png
+python -m svgshot.convert corpus/window.png window.svg --html window.html
+```
+
+For convenience, capture and convert in memory without creating an intermediate
+PNG or JSON file:
+
+```sh
+python -m svgshot.convert --capture window.svg --html window.html
+```
+
+Installed entry points are `svgshot-grab` and `svgshot-convert`. Both support
+`--foreground --delay 5`; capture also offers platform-specific window selection.
+Use `--no-ocr` on the converter to reconstruct from supplied semantics and imagery.
+`--allow-raster` remains opt-in. Capturing does not require the SVG renderer's
+numpy/scipy/Tesseract dependencies on Windows/macOS when using native helpers.
+
+The unified schema uses named roles/states/styles and PNG pixel coordinates,
+with provider-specific metadata retained separately. See the
+[version 3 schema specification](docs/capture-schema.md) and
+[JSON Schema](docs/capture.schema.json). Legacy UIA v1/v2 PNGs and JSON sidecars
+remain readable:
+
+```sh
+python -m svgshot.convert capture.png revised.svg --uia capture.uia.json
+python -m svgshot.snapshot capture.png --json capture.capture.json
+```
+
+The original `python -m svgshot.capture output.svg` command is retained; it keeps
+its old capture-and-save flow. New work should use the explicit commands above.
+The pixel-only `svgshot` / `python -m svgshot.cli` converter remains available.
+
+### Windows
+
+The native helper uses C++20, the Windows SDK, UIA, Windows Graphics Capture, WIC
+and vendored miniz. It emits schema v3 directly. Requires Windows 10 1903+ and a
+non-minimized target. Install Visual Studio's Desktop development with C++ workload
+and a Windows SDK, then choose ARM64, x64 or Win32:
 
 ```powershell
 cmake -S capture/windows -B build/capture -A ARM64
 cmake --build build/capture --config Release
-```
-
-The Python dependencies and Tesseract are the same as for ordinary conversion.
-Run directly from the checkout, with no package reinstall after source updates:
-
-```powershell
-.\.venv\Scripts\python.exe -m svgshot.capture capture.svg --html capture.html
-```
-
-After updates to the native source, repeat `cmake --build build/capture --config
-Release`. The Python command finds `build/capture/Release/svgshot-capture-win.exe`
-automatically. `--helper path\to\svgshot-capture-win.exe`, the environment variable
-`SVGSHOT_CAPTURE_HELPER`, or an executable on `PATH` can specify another build.
-Installing the Python package also provides the `svgshot-capture` entry point;
-the native helper is named `svgshot-capture-win.exe` to avoid a command-name collision.
-
-For keyboard-based capture, switch to the intended window during a delay:
-
-```powershell
-.\.venv\Scripts\python.exe -m svgshot.capture capture.svg --foreground --delay 5
-```
-
-`--hwnd 0x123456` targets a known window handle. The picker freezes the desktop
-visually while selecting, and its click does not press a control in the target.
-The captured bitmap is a fresh window frame after selection, not that frozen
-selection preview. UIA extraction has a 20-second provider timeout and limits
-of 5000 elements / 64 levels; any truncation is recorded in the snapshot.
-
-The native capture and SVG conversion tools can run independently:
-
-```powershell
 .\build\capture\Release\svgshot-capture-win.exe --out capture
-.\.venv\Scripts\python.exe -m svgshot.capture revised.svg --image capture.png --html revised.html
+.\.venv\Scripts\python.exe -m svgshot.convert capture.png capture.svg
 ```
 
-Each live capture saves **one self-contained `capture.png`**, with a compressed
-UTF-8 JSON UIA snapshot in a private PNG `suIA` chunk. The native `--json` option
-also exports `capture.uia.json`; `--uia-only` writes only that JSON, without a PNG.
-Extract the embedded snapshot on any platform with:
+Native `--out PREFIX` writes `PREFIX.png`; `--json` additionally writes the unified
+snapshot to `PREFIX.uia.json` (legacy filename retained). `--uia-only` writes JSON
+only. `--stdout` emits a binary semantic PNG with no intermediate file. Selection
+supports the existing point-at-window picker, `--hwnd`, and delayed `--foreground`.
+`--helper` or `SVGSHOT_CAPTURE_HELPER` can select an explicit native build.
+
+After native-source changes, rebuild. Python searches an explicit helper, the
+environment override, PATH, and then build/capture/Release or build/capture.
+Privacy defaults from v2 remain: password content is always excluded; offscreen
+text, full edit values and diagnostic strings are redacted unless explicitly
+permitted by `--include-hidden-content`. Names/help may contain nonpainted text.
+UIA and bitmap are successive observations; moving/resizing the window fails.
+Windows captures up to 5000 nodes, 64 levels, 2000 lines per element, 2048 format
+runs and 256 selections, with limits/errors retained in native metadata.
+
+### macOS
+
+Build with Xcode command-line tools on macOS 14+:
 
 ```sh
-python -m svgshot.snapshot capture.png --json capture.uia.json
+mkdir -p build/capture
+swiftc -parse-as-library -O -I capture/macos capture/macos/main.swift -o build/capture/svgshot-capture-macos
+build/capture/svgshot-capture-macos --out capture.png
+python -m svgshot.convert capture.png capture.svg
 ```
 
-The collector retains the Raw View tree, including offscreen nodes. Schema v2
-adds typed UIA property values and statuses, registered property/pattern names,
-pattern availability, relationship IDs, text selections, line attributes, and
-formatting runs. Built-in property IDs 30000–30199 are queried when registered
-by the installed UIA runtime; built-in patterns 10000–10034 and text attributes
-40000–40043 are covered. Pattern state properties preserve table/grid structure,
-headers, range limits, scroll positions, accessibility relationships, and more.
-No Invoke, SetValue, Scroll, Realize, focus-setting, or other control actions run.
-Properties distinguish values, unsupported values, read failures, mixed text
-attributes, redactions, and values that cannot be serialized. The existing
-convenience fields remain for renderer compatibility; the typed property records
-are authoritative when those convenience fields are empty/defaulted on failure.
-Password contents and descendants remain redacted.
+The Swift helper uses AXUIElement, ScreenCaptureKit/SCScreenshotManager, ImageIO
+and system zlib. It supports a window chooser, `--list-windows`, `--window CGWindowID`,
+`--foreground`, delayed capture, file output and binary PNG stdout. Accessibility
+and screen-capture authorization are required. The helper refuses ambiguous
+AX-window/screenshot associations, checks movement, clips text to visible ranges,
+and redacts secure text fields. This first backend captures a descriptive subset;
+unsupported/error results remain explicit. Hidden-content opt-in is not supported.
+Native provider smoke is currently compile/help only; GUI/privacy integration
+needs testing on an authorized Mac desktop.
 
-This is a bounded descriptive snapshot, not an exhaustive UIA object dump.
-Custom property/pattern registrations are not discovered, unknown COM objects
-are marked unserialized, and virtualized elements are not realized. Limits and
-redaction policy are stored in `capture_policy`; tree/text truncation produces
-warnings. Text has up to 2000 lines, 2048 formatting runs, and 256 selections per
-element, with a 65536 UTF-16-character limit per text range. UIA references retain
-runtime IDs even when their target lies outside the captured tree.
+### Linux
 
-The privacy review found that full edit values and selections can include text
-scrolled out of view. By default, offscreen/out-of-window nodes retain structural
-records but their content is redacted. Full Value/Legacy value strings, automation
-IDs, process/window-handle properties, and non-descriptive string properties are
-also redacted. Text comes from UIA visible ranges; selections are intersected with
-those ranges before their text is read. Ranges marked hidden (or mixed hidden/visible)
-by the provider are redacted in the default mode. `--include-hidden-content` is an explicit
-native/live-capture opt-in to the broader content, and its use is recorded in the
-snapshot. Password redaction remains active in both modes.
-
-Accessible names, help text, and descriptions of visible controls are retained:
-they are necessary to interpret icon buttons and other controls. They can contain
-information **not painted in the bitmap**, including full names behind clipped
-labels. This is accessibility metadata, not a guarantee that every embedded string
-is visible or free of PII. Review the extracted JSON before sharing sensitive
-captures. The collector does not inspect files, process command lines, clipboard,
-other windows, or application storage, and it does not invoke controls. Metadata
-remains embedded in SVG/HTML output as well as PNG input.
-
-The `suIA` payload has a 16-byte big-endian header: 8-byte `SVGSHOT\0` magic,
-container version 1, encoding 1 (JSON), compression 1 (zlib/DEFLATE), reserved zero,
-and a 4-byte uncompressed length. A separate zlib stream follows. PNG framing
-supplies the chunk length and CRC. Writers put the chunk before `IEND`; readers
-scan for it. Limits are 64 MiB decompressed JSON and 16 MiB chunk payload. The
-chunk is ancillary, private, and unsafe to copy after image edits: an editor that
-does not understand it should discard it when modifying the image data. Ordinary
-viewers display the PNG; they do not automatically expose UIA semantics.
-
-Existing version-1 PNG/JSON pairs still work without recapture:
+Use AT-SPI2 through PyGObject, with X11 bitmap capture through Pillow/XCB. Native
+ELF packages contain a small launcher and bundled capture zipapp; distribution
+Python/GI/AT-SPI/Pillow remain runtime dependencies. See
+[Linux setup and Wayland limitations](docs/linux-capture.md).
 
 ```sh
-python -m svgshot.capture revised.svg --image capture.png --uia capture.uia.json \
-  --scene revised.scene.json --html revised.html
+/usr/bin/python3 -m svgshot.grab --list-windows
+/usr/bin/python3 -m svgshot.grab capture.png --window 0:0
+python -m svgshot.convert capture.png capture.svg
 ```
 
-`--no-ocr` works without Tesseract and uses UIA captions/text plus vector geometry.
-Windows Terminal text uses its UIA character grid with a monospace font, uniform
-line height, preserved spaces, and UIA foreground colours for each formatting run.
-PNG colour sampling is used only when UIA does not supply a foreground colour. Clipped XAML
-labels use a visual ellipsis while retaining their full accessible names.
-UIA strings take precedence over overlapping OCR; OCR helps fit text into its
-visible ink bounds and supplies labels absent from UIA. UIA image and container
-names remain semantic descriptions rather than invented visible captions.
-`--config` accepts the existing recognition options; this capture command always
-disables source-image overlays, and only `--allow-raster` enables small raster
-fallback. The retained SVG renderer may still use its deliberate full-width
-raster title gradient.
+Automatic capture is supported on X11. Wayland currently requires explicit pairing
+with a window bitmap and its bounds; the backend does not guess which portal window
+matches an accessibility tree. Linux CI exercises a real GTK/AT-SPI/X11 fixture.
 
-The SVG has a navigable descriptive hierarchy, source roles in `data-uia-role`,
-state descriptions, exact captured UIA metadata, and actual SVG text. It is
-explicitly a **static capture**: descriptions such as “Add…, button” convey the
-original control's meaning without offering fake clickable controls. Offscreen
-or out-of-crop nodes stay in the source snapshot but are omitted from the reader
-presentation. Visual geometry is separate from reading order to avoid duplicate
-announcements. Decorative vector shapes are hidden from the accessibility tree.
+### Latest-source capture binaries
 
-Use inline SVG in documentation to expose its descendants. An `<img src="...">`
-usually presents an atomic image, losing the navigable structure. `--html`
-creates an inline SVG preview plus a standard HTML outline for readers whose SVG
-support is limited. Test the final embedding with your target browser and screen
-reader; full UIA-to-SVG behavior parity is not claimed. The original application
-can provide custom accessibility interfaces or semantics UIA does not expose.
+The [rolling capture release](https://github.com/sh1bot/svgshot/releases/tag/capture-latest)
+updates from main without a version tag. Every package includes SOURCE.txt with
+the exact commit. CI also retains artifacts for branch/PR builds.
 
-UIA and the bitmap are successive observations, not an atomic application
-snapshot. Use a stable window for documentation. The helper rejects a moved or
-resized window; it cannot detect every animation or content change. Coordinate
-mapping across a capture-size mismatch emits a warning for inspection. Provider
-text ranges may omit covered text even though window capture obtains the window
-image; OCR can fill those gaps. Unknown artwork is simplified by the existing
-recognizer, with its existing limitations.
+| Platform | Built architectures | Runtime |
+|---|---|---|
+| Windows | x86, x86-64, ARM64 | Windows 10 1903+ |
+| macOS | x86-64, ARM64 | macOS 14+, permissions |
+| Linux glibc | x86, x86-64, ARMv7 hard-float, ARM64, RISC-V64 | Python 3.10+, GI/AT-SPI2, Pillow |
 
-The Windows workflow compiles native x64 and ARM64 builds and exercises actual
-Win32 UIA controls, Windows Graphics Capture, and PNG encoding on x64. Cross-platform replay tests cover text correction,
-states, coordinate mapping, XML escaping, and the separate CLI. Live capture and
-screen-reader behavior still require testing on a real Windows desktop.
+Current macOS supports no 32-bit application targets. The current Windows SDK/VS
+capture build has no supported ARM32 target. Linux packages are not self-contained
+Python runtimes and are not musl builds; compile the launcher locally on other libc
+versions or run the portable zipapp directly.
+
+### Static accessibility output
+
+SVG retains the exact unified snapshot in metadata, separates visible artwork from
+its semantic outline, and describes controls as informational groups. HTML adds a
+nested textual outline for readers that flatten SVG accessibility. Browser and
+screen-reader support varies; static captures cannot reproduce live interaction
+or announcements. Test the final documentation embedding with the intended reader.

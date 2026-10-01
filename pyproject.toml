@@ -12,6 +12,8 @@ dependencies = ["Pillow>=10", "numpy>=1.24", "scipy>=1.10"]
 [project.scripts]
 svgshot = "svgshot.cli:main"
 svgshot-capture = "svgshot.capture:main"
+svgshot-grab = "svgshot.grab:main"
+svgshot-convert = "svgshot.convert:main"
 svgshot-fixture = "svgshot.fixture:main"
 
 [tool.setuptools.packages.find]

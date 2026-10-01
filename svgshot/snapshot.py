@@ -6,6 +6,8 @@ The payload is a 16-byte big-endian header, then a separate zlib JSON stream.
 from __future__ import annotations
 
 import argparse
+import io
+from contextlib import nullcontext
 import json
 import struct
 import zlib
@@ -52,7 +54,7 @@ def decode_snapshot(data):
 
 def png_chunks(path):
     """Scan framing without loading image chunks into memory."""
-    with Path(path).open("rb") as stream:
+    with (nullcontext(path) if hasattr(path, "read") else Path(path).open("rb")) as stream:
         size = stream.seek(0, 2)
         stream.seek(0)
         if stream.read(8) != SIGNATURE:
@@ -89,6 +91,25 @@ def read_snapshot(path):
     if data is None:
         raise ValueError("PNG has no embedded UIA snapshot; provide --uia for an older capture")
     return decode_snapshot(data)
+
+
+def embed_snapshot(png, snapshot):
+    """Return a PNG with one authoritative snapshot, without decoding its pixels."""
+    list(png_chunks(io.BytesIO(png)))  # Validate framing and existing metadata CRC.
+    payload = encode_snapshot(snapshot)
+    encoded = struct.pack('>I', len(payload)) + CHUNK + payload
+    encoded += struct.pack('>I', zlib.crc32(CHUNK+payload) & 0xffffffff)
+    out = bytearray(SIGNATURE)
+    offset = 8
+    while offset < len(png):
+        length, name = struct.unpack('>I4s', png[offset:offset+8])
+        end = offset + length + 12
+        if name == b'IEND':
+            out.extend(encoded)
+        if name != CHUNK:
+            out.extend(png[offset:end])
+        offset = end
+    return bytes(out)
 
 
 def main(argv=None):

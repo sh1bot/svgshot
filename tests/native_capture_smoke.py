@@ -16,7 +16,11 @@ def walk(node):
 
 snapshot = read_snapshot('build/live.png')
 assert snapshot == json.loads(Path('build/live.uia.json').read_text(encoding='utf-8')), 'PNG/JSON mismatch'
-assert snapshot['version'] == 2, 'Wrong schema version'
+assert snapshot['version'] == 3, 'Wrong schema version'
+from svgshot.schema import validate, from_uia
+validate(snapshot)
+assert snapshot == from_uia(snapshot['native']['snapshot']), 'Native/common normalization differs'
+snapshot = snapshot['native']['snapshot']
 assert snapshot['property_names'], 'No property registry'
 assert snapshot['pattern_names'], 'No pattern registry'
 assert snapshot['capture_policy']['actions_invoked'] is False, 'Unexpected action policy'
@@ -37,7 +41,7 @@ assert any(p.get('status') == 'value' and p.get('value') == 1
 print(f"Validated {len(nodes)} elements, embedded JSON, typed state, formatting, and password redaction")
 
 # Full capture is an explicit opt-in; passwords remain excluded even then.
-broad = read_snapshot('build/broad.png')
+broad = read_snapshot('build/broad.png')['native']['snapshot']
 assert broad['capture_policy']['include_hidden_content'] is True
 assert 'PasswordHiddenSentinel' not in json.dumps(broad), 'Password leaked in opt-in mode'
 assert any('value' in n['states'] for n in walk(broad['root']) if not n['password']), 'Opt-in values missing'

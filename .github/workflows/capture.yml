@@ -32,9 +32,9 @@ jobs:
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke --uia-only
             if ($LASTEXITCODE -ne 0) { throw 'UIA snapshot failed' }
             $snapshot = Get-Content -Raw build/smoke.uia.json | ConvertFrom-Json
-            if ($snapshot.root.name -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
+            if ($snapshot.root.label -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
             $raw = Get-Content -Raw build/smoke.uia.json
-            if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"toggle":1')) { throw 'Missing control semantics' }
+            if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"checked":"checked"')) { throw 'Missing control semantics' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live --json
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad --include-hidden-content
@@ -50,7 +50,7 @@ jobs:
             $png = [System.Drawing.Image]::FromFile((Resolve-Path build/live.png))
             try {
               $live = Get-Content -Raw build/live.uia.json | ConvertFrom-Json
-              if ($live.image_size[0] -ne $png.Width -or $live.image_size[1] -ne $png.Height) { throw 'PNG/UIA dimensions differ' }
+              if ($live.image.size[0] -ne $png.Width -or $live.image.size[1] -ne $png.Height) { throw 'PNG/UIA dimensions differ' }
             } finally { $png.Dispose() }
           } finally { Stop-Process -Id $fixture.Id -ErrorAction SilentlyContinue }
       - uses: actions/upload-artifact@v4

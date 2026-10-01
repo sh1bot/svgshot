@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sh1bot/svgshot/blob/main/docs/capture.schema.json",
+  "title": "svgshot unified capture version 3",
+  "type": "object",
+  "required": [
+    "format",
+    "version",
+    "source",
+    "image",
+    "root",
+    "native",
+    "capture_policy",
+    "warnings"
+  ],
+  "properties": {
+    "format": {
+      "const": "svgshot.capture"
+    },
+    "version": {
+      "const": 3
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "platform",
+        "provider"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "size",
+        "coordinate_space"
+      ],
+      "properties": {
+        "size": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "coordinate_space": {
+          "const": "image-pixels"
+        }
+      }
+    },
+    "root": {
+      "$ref": "#/$defs/node"
+    },
+    "native": {
+      "type": "object",
+      "required": [
+        "provider"
+      ]
+    },
+    "capture_policy": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "rectangle": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "observation": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "value",
+            "not_supported",
+            "not_captured",
+            "error",
+            "redacted",
+            "truncated",
+            "mixed",
+            "unresolved"
+          ]
+        },
+        "value": {}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "value"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "value"
+            ]
+          }
+        }
+      ]
+    },
+    "text": {
+      "type": "object",
+      "required": [
+        "content",
+        "rectangles",
+        "style"
+      ],
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "rectangles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rectangle"
+          }
+        },
+        "style": {
+          "type": "object"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/text"
+          }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "id",
+        "role",
+        "bounds",
+        "states",
+        "relationships",
+        "children",
+        "text",
+        "value"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bounds": {
+          "$ref": "#/$defs/rectangle"
+        },
+        "states": {
+          "type": "object"
+        },
+        "relationships": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        },
+        "text": {
+          "type": "object",
+          "required": [
+            "status",
+            "lines"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "value",
+                "not_supported",
+                "not_captured",
+                "error",
+                "redacted",
+                "truncated",
+                "mixed",
+                "unresolved"
+              ]
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "selections": {
+              "$ref": "#/$defs/observation"
+            }
+          }
+        },
+        "value": {
+          "$ref": "#/$defs/observation"
+        },
+        "field_status": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/observation"
+          }
+        }
+      }
+    }
+  }
+}
