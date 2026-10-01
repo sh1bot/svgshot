@@ -10,6 +10,7 @@ import sys
 
 from .schema import validate
 from .snapshot import read_snapshot, embed_snapshot
+from .output import capture_path
 
 
 def helper(platform, explicit=None):
@@ -124,7 +125,8 @@ def options(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Capture a window into a self-contained semantic PNG')
-    parser.add_argument('output', nargs='?', type=Path, help='PNG capture to store')
+    parser.add_argument('output', nargs='?', type=Path, help='PNG filename (default: dated capture on Desktop)')
+    parser.add_argument('--out', type=Path, help='PNG filename, as an alternative to the positional filename')
     parser.add_argument('--stdout', action='store_true', help='Write binary semantic PNG to stdout')
     parser.add_argument('--json', type=Path, help='Also export the unified snapshot as JSON')
     parser.add_argument('--list-windows', action='store_true')
@@ -135,13 +137,22 @@ def main(argv=None):
             if sys.platform == 'darwin' or sys.platform.startswith('linux'):
                 return subprocess.run([helper(sys.platform, args.helper), '--list-windows'], check=False).returncode
             raise ValueError('--list-windows is available on Linux/macOS')
-        if bool(args.output) == bool(args.stdout):
-            raise ValueError('Choose an output PNG or --stdout')
+        if args.output and args.out:
+            raise ValueError('Choose a filename or --out, not both')
+        args.output = args.output or args.out
+        automatic = not args.output and not args.stdout
+        if args.output and args.stdout:
+            raise ValueError('Output PNG cannot be combined with --stdout')
         if args.output and args.output.suffix.lower() != '.png':
             raise ValueError('Capture output must have a .png extension')
         if args.json and args.output and args.json.resolve() == args.output.resolve():
             raise ValueError('JSON must not overwrite the PNG')
         png = capture_bytes(**options(args))
+        if automatic:
+            snapshot = read_snapshot(io.BytesIO(png))
+            args.output = capture_path(snapshot['root'].get('label', ''))
+        if args.json and args.output and args.json.resolve() == args.output.resolve():
+            raise ValueError('JSON must not overwrite the PNG')
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             # Atomic replace: a failed capture does not overwrite the previous corpus entry.
@@ -150,9 +161,13 @@ def main(argv=None):
                 temporary = Path(f.name)
                 f.write(png)
             try:
-                os.replace(temporary, args.output)
+                if automatic:
+                    os.link(temporary, args.output)  # Never replace another capture on a naming collision.
+                else:
+                    os.replace(temporary, args.output)
             finally:
                 temporary.unlink(missing_ok=True)
+            print(args.output)
         else:
             sys.stdout.buffer.write(png)
         if args.json:

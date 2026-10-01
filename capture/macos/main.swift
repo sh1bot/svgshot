@@ -186,6 +186,31 @@ func embedded(_ png: Data, _ json: Data) throws -> Data {
     var out=png;out.insert(contentsOf:chunk,at:png.count-12);return out
 }
 
+func desktopCaptureURL(_ title: String) throws -> URL {
+    guard let desktop=FileManager.default.urls(for:.desktopDirectory,in:.userDomainMask).first else {
+        throw fail("Cannot locate Desktop folder")
+    }
+    try FileManager.default.createDirectory(at:desktop,withIntermediateDirectories:true)
+    var clean=String(title.prefix(100)).map { c -> Character in
+        if c.unicodeScalars.contains(where: {$0.value<32}) || "<>:\"/\\|?*".contains(c) {return "_"}
+        return c
+    }
+    while String(clean).utf8.count>180 {clean.removeLast()}
+    while let last=clean.last,last=="." || last==" " {clean.removeLast()}
+    let name=clean.isEmpty ? "Window" : String(clean)
+    let formatter=DateFormatter()
+    formatter.locale=Locale(identifier:"en_US_POSIX")
+    formatter.calendar=Calendar(identifier:.gregorian)
+    formatter.timeZone=TimeZone.current
+    formatter.dateFormat="yyyy-MM-dd_HH-mm-ss-SSS"
+    let stem="\(formatter.string(from:Date())) - \(name)"
+    var output=desktop.appendingPathComponent(stem+".png")
+    var suffix=2
+    while FileManager.default.fileExists(atPath:output.path) {
+        output=desktop.appendingPathComponent("\(stem) (\(suffix)).png");suffix+=1
+    }
+    return output
+}
 @main struct Main {
     @MainActor static func main() async {
         do {
@@ -194,9 +219,32 @@ func embedded(_ png: Data, _ json: Data) throws -> Data {
                 print("svgshot-capture-macos \(captureBuildCommit)");return
             }
             if args.contains("--help") {
-                print("svgshot-capture-macos [--out capture.png | --stdout] [--window CGWindowID | --foreground] [--delay SECONDS] [--list-windows]");return
+                print("svgshot-capture-macos [capture.png | --out capture.png | --stdout] [--window CGWindowID | --foreground] [--delay SECONDS] [--list-windows]\nWithout a filename, save a dated PNG on the Desktop.");return
             }
-            func option(_ key: String) -> String? { guard let i=args.firstIndex(of:key),i+1<args.count else{return nil};return args[i+1] }
+            var values:[String:String]=[:],flags=Set<String>(),filename:String?
+            var i=0
+            while i<args.count {
+                let arg=args[i]
+                if ["--out","--window","--delay"].contains(arg) {
+                    guard i+1<args.count else {throw fail("Incomplete option \(arg)")}
+                    i+=1;values[arg]=args[i]
+                } else if ["--foreground","--stdout","--framed","--list-windows"].contains(arg) {
+                    flags.insert(arg)
+                } else if !arg.hasPrefix("-"),filename==nil {filename=arg}
+                else {throw fail("Unknown or duplicate argument \(arg)")}
+                i+=1
+            }
+            guard filename==nil || values["--out"]==nil else {throw fail("Choose a filename or --out, not both")}
+            filename=filename ?? values["--out"]
+            if let filename,URL(fileURLWithPath:filename).pathExtension.lowercased() != "png" {
+                throw fail("Output filename must end in .png")
+            }
+            let binary=flags.contains("--stdout") || flags.contains("--framed")
+            guard !binary || filename==nil else {throw fail("Binary output cannot be combined with an output filename")}
+            guard !flags.contains("--stdout") || !flags.contains("--framed") else {throw fail("Choose --stdout or --framed")}
+            guard values["--window"]==nil || !flags.contains("--foreground") else {throw fail("Choose --window or --foreground")}
+            if let id=values["--window"],UInt32(id)==nil {throw fail("Invalid window ID")}
+            func option(_ key: String) -> String? {return values[key]}
             let delay=Double(option("--delay") ?? "0") ?? -1
             guard delay>=0 && delay<=60 else { throw fail("Delay must be 0–60") }
             if delay>0 { try await Task.sleep(nanoseconds:UInt64(delay*1_000_000_000)) }
@@ -259,8 +307,12 @@ func embedded(_ png: Data, _ json: Data) throws -> Data {
                 FileHandle.standardOutput.write(be32(UInt32(json.count)));FileHandle.standardOutput.write(json);FileHandle.standardOutput.write(png)
             } else {
                 let capture=try embedded(png,json)
-                if let out=option("--out") {try capture.write(to:URL(fileURLWithPath:out),options:.atomic)}
-                else {FileHandle.standardOutput.write(capture)}
+                if flags.contains("--stdout") {FileHandle.standardOutput.write(capture)}
+                else {
+                    let output=try filename.map{URL(fileURLWithPath:$0)} ?? desktopCaptureURL(window.title ?? "")
+                    try capture.write(to:output,options:filename==nil ? .withoutOverwriting : .atomic)
+                    print(output.path)
+                }
             }
         } catch {
             FileHandle.standardError.write(Data("svgshot capture: \(error.localizedDescription)\n".utf8));exit(1)

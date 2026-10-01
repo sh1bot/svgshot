@@ -54,7 +54,7 @@ else:
         assert any(n['text'].get('lines') for n in all_nodes),'Visible text ranges missing'
         with __import__('tempfile').TemporaryDirectory() as folder:
             path=Path(folder)/'capture.png'
-            subprocess.run([helper,'--window',target,'--out',str(path)],check=True)
+            subprocess.run([helper,str(path),'--window',target],check=True)
             stored=read_snapshot(path);validate(stored)
             assert stored['root']['label']==snapshot['root']['label']
             # Explicit bitmap pairing must keep the original pixel data.
@@ -65,6 +65,14 @@ else:
             from svgshot.grab import capture_bytes
             wrapped=capture_bytes(native_helper=helper,window=target)
             validate(read_snapshot(io.BytesIO(wrapped)))
+            config=Path(folder)/'config';config.mkdir()
+            desktop=Path(folder)/'Desktop Captures'
+            (config/'user-dirs.dirs').write_text(f'XDG_DESKTOP_DIR="{desktop}"\n')
+            generated=Path(subprocess.check_output([helper,'--window',target],
+                env={**os.environ,'XDG_CONFIG_HOME':str(config)},text=True).strip())
+            assert generated.parent==desktop,'Ignored configured Desktop location'
+            assert generated.name.endswith(' - svgshot Linux Fixture.png')
+            validate(read_snapshot(generated))
         print('Validated native Linux file/stdout/pairing/frontend, visible text, checked state and password redaction')
     finally:
         process.terminate();process.wait(timeout=5)

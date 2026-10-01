@@ -10,6 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <iomanip>
+#include <ctime>
 #include <iostream>
 #include <json-c/json.h>
 #include <map>
@@ -698,7 +701,7 @@ std::vector<unsigned char> semantic_png(const Image &image, const J &snapshot) {
   return png;
 }
 void atomic_write(const std::string &path,
-                  const std::vector<unsigned char> &data) {
+                  const std::vector<unsigned char> &data, bool replace = true) {
   std::string pattern = path + ".XXXXXX";
   std::vector<char> temp(pattern.begin(), pattern.end());
   temp.push_back(0);
@@ -719,10 +722,41 @@ void atomic_write(const std::string &path,
   }
   if (close(fd) != 0)
     success = false;
-  if (!success || rename(temp.data(), path.c_str()) != 0) {
+  int installed = success ? (replace ? rename(temp.data(), path.c_str())
+                                   : link(temp.data(), path.c_str())) : -1;
+  if (!success || installed != 0) {
     unlink(temp.data());
     throw std::runtime_error("Cannot write capture output");
   }
+  if (!replace) unlink(temp.data());
+}
+std::string desktop_capture_path(std::string title) {
+  const char *configured = g_get_user_special_dir(G_USER_DIRECTORY_DESKTOP);
+  auto desktop = configured ? std::filesystem::path(configured)
+                            : std::filesystem::path(g_get_home_dir()) / "Desktop";
+  std::filesystem::create_directories(desktop);
+  for (char &c : title)
+    if (static_cast<unsigned char>(c) < 32 || std::string("<>:\"/\\|?*").find(c) != std::string::npos)
+      c = '_';
+  if (g_utf8_strlen(title.c_str(), -1) > 100)
+    title.resize(g_utf8_offset_to_pointer(title.c_str(), 100) - title.c_str());
+  while (title.size() > 180)
+    title.resize(g_utf8_find_prev_char(title.c_str(), title.c_str() + title.size()) - title.c_str());
+  while (!title.empty() && (title.back() == '.' || title.back() == ' ')) title.pop_back();
+  if (title.empty()) title = "Window";
+  auto now = std::chrono::system_clock::now();
+  auto time = std::chrono::system_clock::to_time_t(now);
+  std::tm local{};
+  localtime_r(&time, &local);
+  auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+  std::ostringstream name;
+  name << std::put_time(&local, "%Y-%m-%d_%H-%M-%S-") << std::setfill('0') << std::setw(3)
+       << milliseconds << " - " << title;
+  auto stem = name.str();
+  auto output = desktop / (stem + ".png");
+  for (unsigned suffix = 2; std::filesystem::exists(output); ++suffix)
+    output = desktop / (stem + " (" + std::to_string(suffix) + ").png");
+  return output.string();
 }
 int main(int argc, char **argv) {
   try {
@@ -744,12 +778,12 @@ int main(int argc, char **argv) {
       }
       if (arg == "--help") {
         std::cout
-            << "svgshot-capture-linux [--out capture.png | --stdout] [--window "
+            << "svgshot-capture-linux [capture.png | --out capture.png | --stdout] [--window "
                "ID | --foreground] [--delay SECONDS] [--json capture.json] "
                "[--include-hidden-content]\n  --list-windows   List "
                "capture-local AT-SPI window IDs\n  --version        Report "
                "source commit\n  --bitmap PNG --window-bounds X Y W H   "
-               "Explicit Wayland bitmap pairing\n";
+               "Explicit Wayland bitmap pairing\nWithout a filename, save a dated PNG on the Desktop.\n";
         return 0;
       }
       if (arg == "--window")
@@ -778,6 +812,8 @@ int main(int argc, char **argv) {
         hidden = true;
       else if (arg == "--list-windows")
         list = true;
+      else if (!arg.empty() && arg[0] != '-' && out.empty())
+        out = arg;
       else
         throw std::runtime_error("Unknown option " + arg);
     }
@@ -786,8 +822,14 @@ int main(int argc, char **argv) {
     if (!window.empty() && foreground)
       throw std::runtime_error("Choose --window or --foreground");
     if (!list) {
-      if (out.empty() == !stdout_png)
-        throw std::runtime_error("Choose --out PNG or --stdout");
+      if (!out.empty() && stdout_png)
+        throw std::runtime_error("Output PNG cannot be combined with --stdout");
+      if (!out.empty()) {
+        auto extension = std::filesystem::path(out).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return char(g_ascii_tolower(c)); });
+        if (extension != ".png") throw std::runtime_error("Output filename must end in .png");
+      }
       if (!json.empty() && (json == out || json == bitmap))
         throw std::runtime_error("JSON must not overwrite a PNG");
       if (bitmap.empty() != !has_bounds)
@@ -819,6 +861,7 @@ int main(int argc, char **argv) {
       std::getline(std::cin, window);
     }
     AtspiAccessible *target = nullptr;
+    std::string title;
     for (auto &w : choices) {
       auto state = own(atspi_accessible_get_state_set(w.node.get()));
       bool active = foreground && state &&
@@ -827,10 +870,15 @@ int main(int argc, char **argv) {
         if (target)
           throw std::runtime_error("Window target is ambiguous");
         target = w.node.get();
+        title = w.title;
       }
     }
     if (!target)
       throw std::runtime_error("Window target missing; refresh --list-windows");
+    bool automatic_path = out.empty() && !stdout_png;
+    if (automatic_path) out = desktop_capture_path(title);
+    if (!json.empty() && json == out)
+      throw std::runtime_error("JSON must not overwrite the PNG");
     bool wayland = std::getenv("WAYLAND_DISPLAY") != nullptr;
     if (wayland && bitmap.empty())
       throw std::runtime_error(
@@ -897,8 +945,10 @@ int main(int argc, char **argv) {
                       std::streamsize(png.size()));
       if (!std::cout)
         throw std::runtime_error("Cannot write PNG stdout");
-    } else
-      atomic_write(out, png);
+    } else {
+      atomic_write(out, png, !automatic_path);
+      std::cout << out << "\n";
+    }
     if (!json.empty()) {
       auto text = snapshot.dump() + "\n";
       atomic_write(json, std::vector<unsigned char>(text.begin(), text.end()));

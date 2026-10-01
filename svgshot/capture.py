@@ -615,7 +615,7 @@ def main(argv=None):
                 raise RuntimeError("Live capture requires Windows; use --image to render a stored PNG")
             prefix = args.output.with_suffix("")
             image_path = Path(str(prefix)+".png")
-            command = [native_helper(args.helper), "--out", str(prefix.resolve())]
+            command = [native_helper(args.helper), "--out", str(image_path.resolve())]
             if args.include_hidden_content:
                 command += ["--include-hidden-content"]
             if args.hwnd:

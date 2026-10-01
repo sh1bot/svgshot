@@ -85,6 +85,12 @@ jobs:
         run: |
           dist/svgshot-capture-macos-arm64 --help
           test "$(dist/svgshot-capture-macos-arm64 --version)" = 'svgshot-capture-macos ${{ github.sha }}'
+          if dist/svgshot-capture-macos-arm64 capture.jpg 2>dist/error.txt; then exit 1; fi
+          grep -q 'Output filename must end in .png' dist/error.txt
+          if dist/svgshot-capture-macos-arm64 capture.png --window invalid 2>dist/error.txt; then exit 1; fi
+          grep -q 'Invalid window ID' dist/error.txt
+          if dist/svgshot-capture-macos-arm64 --out capture.png --stdout 2>dist/error.txt; then exit 1; fi
+          grep -q 'Binary output cannot be combined' dist/error.txt
       - uses: actions/upload-artifact@v4
         with:
           name: capture-macos-${{ matrix.arch }}
