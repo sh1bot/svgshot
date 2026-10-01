@@ -191,8 +191,8 @@ python -m svgshot.convert --capture window.svg --html window.html
 Installed entry points are `svgshot-grab` and `svgshot-convert`. Both support
 `--foreground --delay 5`; capture also offers platform-specific window selection.
 Use `--no-ocr` on the converter to reconstruct from supplied semantics and imagery.
-`--allow-raster` remains opt-in. Capturing does not require the SVG renderer's
-numpy/scipy/Tesseract dependencies on Windows/macOS when using native helpers.
+`--allow-raster` remains opt-in. The native capture executables do not require Python or the SVG renderer's
+numpy/scipy/Tesseract dependencies on any platform.
 
 The unified schema uses named roles/states/styles and PNG pixel coordinates,
 with provider-specific metadata retained separately. See the
@@ -244,7 +244,7 @@ Build with Xcode command-line tools on macOS 14+:
 
 ```sh
 mkdir -p build/capture
-swiftc -parse-as-library -O -I capture/macos capture/macos/main.swift -o build/capture/svgshot-capture-macos
+python3 scripts/build_macos_capture.py build/capture/svgshot-capture-macos
 build/capture/svgshot-capture-macos --out capture.png
 python -m svgshot.convert capture.png capture.svg
 ```
@@ -261,14 +261,15 @@ needs testing on an authorized Mac desktop.
 
 ### Linux
 
-Use AT-SPI2 through PyGObject, with X11 bitmap capture through Pillow/XCB. Native
-ELF packages contain a small launcher and bundled capture zipapp; distribution
-Python/GI/AT-SPI/Pillow remain runtime dependencies. See
+The native C++ helper uses libatspi, Xlib, libpng, json-c and zlib. Python, GI and
+Pillow are not capture runtime dependencies. See
 [Linux setup and Wayland limitations](docs/linux-capture.md).
 
 ```sh
-/usr/bin/python3 -m svgshot.grab --list-windows
-/usr/bin/python3 -m svgshot.grab capture.png --window 0:0
+cmake -S capture/linux -B build/capture
+cmake --build build/capture -j2
+build/capture/svgshot-capture-linux --list-windows
+build/capture/svgshot-capture-linux --out capture.png --window 0:0
 python -m svgshot.convert capture.png capture.svg
 ```
 
@@ -279,19 +280,22 @@ matches an accessibility tree. Linux CI exercises a real GTK/AT-SPI/X11 fixture.
 ### Latest-source capture binaries
 
 The [rolling capture release](https://github.com/sh1bot/svgshot/releases/tag/capture-latest)
-updates from main without a version tag. Every package includes SOURCE.txt with
-the exact commit. CI also retains artifacts for branch/PR builds.
+updates from main without a version tag. Each download is a single native
+executable, with no archive extraction or companion files needed. Run `--version`
+to identify its exact source commit. On Linux/macOS, mark the download executable
+with `chmod +x FILE`. Use `--helper FILE` to select a downloaded helper in the
+Python frontend/converter. CI also retains artifacts for branch/PR builds.
 
 | Platform | Built architectures | Runtime |
 |---|---|---|
 | Windows | x86, x86-64, ARM64 | Windows 10 1903+ |
 | macOS | x86-64, ARM64 | macOS 14+, permissions |
-| Linux glibc | x86, x86-64, ARMv7 hard-float, ARM64, RISC-V64 | Python 3.10+, GI/AT-SPI2, Pillow |
+| Linux glibc | x86, x86-64, ARMv7 hard-float, ARM64, RISC-V64 | AT-SPI2, X11, libpng, json-c, zlib |
 
 Current macOS supports no 32-bit application targets. The current Windows SDK/VS
-capture build has no supported ARM32 target. Linux packages are not self-contained
-Python runtimes and are not musl builds; compile the launcher locally on other libc
-versions or run the portable zipapp directly.
+capture build has no supported ARM32 target. Linux x86/x64/ARM binaries target
+Debian 12 (glibc 2.36+); RISC-V64 targets Debian 13 (glibc 2.41+). Build locally on
+other libc versions. The converter remains a separate Python tool.
 
 ### Static accessibility output
 

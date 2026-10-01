@@ -6,6 +6,10 @@ import ImageIO
 import UniformTypeIdentifiers
 import CZlib
 
+#if !SVGSHOT_BUILD_VERSION
+let captureBuildCommit = "unknown"
+#endif
+
 func fail(_ message: String) -> NSError { NSError(domain: "svgshot", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
 func status(_ s: String, _ value: Any? = nil) -> [String: Any] {
     var r: [String: Any] = ["status": s]
@@ -186,6 +190,9 @@ func embedded(_ png: Data, _ json: Data) throws -> Data {
     @MainActor static func main() async {
         do {
             let args=Array(CommandLine.arguments.dropFirst())
+            if args == ["--version"] {
+                print("svgshot-capture-macos \(captureBuildCommit)");return
+            }
             if args.contains("--help") {
                 print("svgshot-capture-macos [--out capture.png | --stdout] [--window CGWindowID | --foreground] [--delay SECONDS] [--list-windows]");return
             }

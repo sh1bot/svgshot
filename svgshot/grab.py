@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import time
 
 from .schema import from_uia, validate
 from .snapshot import read_snapshot, embed_snapshot
@@ -19,7 +18,8 @@ def helper(platform, explicit=None):
     override = os.environ.get('SVGSHOT_CAPTURE_HELPER')
     if override:
         return override
-    name = 'svgshot-capture-win' if platform == 'win32' else 'svgshot-capture-macos'
+    name = ('svgshot-capture-win' if platform == 'win32' else
+            'svgshot-capture-linux' if platform.startswith('linux') else 'svgshot-capture-macos')
     installed = shutil.which(name)
     if installed:
         return installed
@@ -74,14 +74,23 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
         snapshot = json.loads(result.stdout[4:4+length])
         png = result.stdout[4+length:]
     elif sys.platform.startswith('linux'):
-        if hwnd or native_helper:
-            raise ValueError('Windows helper options are not applicable on Linux')
-        from .linux_capture import capture
+        if hwnd:
+            raise ValueError('Windows handle options are not applicable on Linux')
+        command = [helper(sys.platform, native_helper), '--stdout']
+        if window is not None:
+            command += ['--window', str(window)]
+        if foreground:
+            command += ['--foreground']
         if delay:
-            time.sleep(delay)
-        png, snapshot = capture(window=window, foreground=foreground,
-                                include_hidden=include_hidden_content, bitmap=bitmap,
-                                window_bounds=window_bounds)
+            command += ['--delay', str(delay)]
+        if include_hidden_content:
+            command += ['--include-hidden-content']
+        if bitmap:
+            command += ['--bitmap', str(bitmap)]
+        if window_bounds:
+            command += ['--window-bounds', *map(str, window_bounds)]
+        png = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+60).stdout
+        snapshot = read_snapshot(io.BytesIO(png))
     else:
         raise RuntimeError('Live capture supports Windows, macOS, and Linux')
     validate(snapshot)
@@ -95,7 +104,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
 
 
 def add_options(parser):
-    parser.add_argument('--helper', type=Path, help='Explicit native Windows/macOS helper')
+    parser.add_argument('--helper', type=Path, help='Explicit native capture helper')
     parser.add_argument('--hwnd', help='Windows window handle')
     parser.add_argument('--window', help='Linux capture-local window ID or macOS CGWindowID')
     parser.add_argument('--foreground', action='store_true')
@@ -123,13 +132,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.list_windows:
-            if sys.platform == 'darwin':
+            if sys.platform == 'darwin' or sys.platform.startswith('linux'):
                 return subprocess.run([helper(sys.platform, args.helper), '--list-windows'], check=False).returncode
-            if not sys.platform.startswith('linux'):
-                raise ValueError('--list-windows is available on Linux/macOS')
-            from .linux_capture import list_windows
-            print(json.dumps(list_windows(), ensure_ascii=False, indent=2))
-            return 0
+            raise ValueError('--list-windows is available on Linux/macOS')
         if bool(args.output) == bool(args.stdout):
             raise ValueError('Choose an output PNG or --stdout')
         if args.output and args.output.suffix.lower() != '.png':

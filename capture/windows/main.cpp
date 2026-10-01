@@ -1019,6 +1019,11 @@ int fixture()
 }
 int wmain(int argc, wchar_t **argv)
 {
+    if (argc == 2 && std::wstring(argv[1]) == L"--version")
+    {
+        std::cout << "svgshot-capture-win " << SVGSHOT_COMMIT << "\n";
+        return 0;
+    }
     try
     {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1055,7 +1060,7 @@ int wmain(int argc, wchar_t **argv)
                              "SECONDS] [--json] [--uia-only] [--include-hidden-content]\nSelect a "
                              "window by clicking it; Esc "
                              "cancels. "
-                             "Requires Windows 10 1903+.\n";
+                             "Requires Windows 10 1903+. Use --version for the source commit.\n";
                 return 0;
             }
             else

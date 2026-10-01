@@ -157,10 +157,11 @@ python -m svgshot.convert --capture window.svg --html window.html
 Installed commands are `svgshot-grab` and `svgshot-convert`. Direct conversion
 calls the same capture backend, using an in-memory PNG stream, so semantics and
 privacy defaults match the stored-capture flow. It does not add a corpus entry.
-Native Windows/macOS helpers also support PNG stdout and standalone file output.
+Native helpers on all three platforms support PNG stdout and standalone file output.
 The old `python -m svgshot.capture output.svg ...` command remains compatible and
 keeps its original capture-and-save behaviour.
 
 Build and distribution instructions are in the repository README and
 [linux-capture.md](linux-capture.md). Rolling `capture-latest` release assets are
-built from main, include SOURCE.txt, and update without requiring a version tag.
+built from main as single native executables and update without requiring a
+version tag. Each executable reports its embedded source commit with `--version`.

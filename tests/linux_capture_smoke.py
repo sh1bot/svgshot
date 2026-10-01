@@ -7,8 +7,8 @@ import gi
 gi.require_version('Gtk','3.0')
 gi.require_version('Atspi','2.0')
 from gi.repository import Gtk,Atspi
-from svgshot.linux_capture import capture,windows
 from svgshot.schema import validate
+from svgshot.snapshot import read_snapshot
 import subprocess
 if '--fixture' in sys.argv:
     w=Gtk.Window(title='svgshot Linux Fixture');w.set_default_size(320,180)
@@ -27,11 +27,16 @@ else:
     try:
         target=None
         for _ in range(60):
-            target=next((key for key,app,n in windows(Atspi) if n.get_name()=='svgshot Linux Fixture'),None)
+            import json
+            helper=sys.argv[1]
+            listed=json.loads(subprocess.check_output([helper,'--list-windows']))
+            target=next((n['id'] for n in listed if n['title']=='svgshot Linux Fixture'),None)
             if target:break
             time.sleep(.1)
         assert target,'GTK window did not register with AT-SPI'
-        png,snapshot=capture(window=target)
+        import io
+        png=subprocess.check_output([helper,'--window',target,'--stdout'])
+        snapshot=read_snapshot(io.BytesIO(png))
         validate(snapshot)
         import json
         data=json.dumps(snapshot)
@@ -39,6 +44,27 @@ else:
         assert 'PasswordHiddenSentinel' not in data
         assert 'checked' in data
         assert png.startswith(b'\x89PNG')
-        print('Validated live Linux accessibility, bitmap, checked state and password redaction')
+        from PIL import Image
+        image=Image.open(io.BytesIO(png));assert list(image.size)==snapshot['image']['size']
+        def nodes(n):
+            yield n
+            for c in n['children']:yield from nodes(c)
+        all_nodes=list(nodes(snapshot['root']))
+        assert any(n['states'].get('checked')=='checked' for n in all_nodes)
+        assert any(n['text'].get('lines') for n in all_nodes),'Visible text ranges missing'
+        with __import__('tempfile').TemporaryDirectory() as folder:
+            path=Path(folder)/'capture.png'
+            subprocess.run([helper,'--window',target,'--out',str(path)],check=True)
+            stored=read_snapshot(path);validate(stored)
+            assert stored['root']['label']==snapshot['root']['label']
+            # Explicit bitmap pairing must keep the original pixel data.
+            b=snapshot['image']['source_bounds']
+            paired=subprocess.check_output([helper,'--window',target,'--stdout','--bitmap',str(path),
+                                           '--window-bounds',*map(str,b)])
+            assert Image.open(io.BytesIO(paired)).tobytes()==image.tobytes()
+            from svgshot.grab import capture_bytes
+            wrapped=capture_bytes(native_helper=helper,window=target)
+            validate(read_snapshot(io.BytesIO(wrapped)))
+        print('Validated native Linux file/stdout/pairing/frontend, visible text, checked state and password redaction')
     finally:
         process.terminate();process.wait(timeout=5)
