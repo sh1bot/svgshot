@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from html import escape
 from pathlib import Path
 
@@ -101,6 +102,75 @@ def normalize(text):
     return " ".join(text.replace("&", "").replace("…", "...").casefold().split())
 
 
+def icon_text(text):
+    return bool(text.strip()) and all(unicodedata.category(c) == "Co" or c.isspace() for c in text)
+
+
+def trace_artwork(image, box):
+    """Simplify screenshot ink into flat vector contours, without font dependence."""
+    import numpy as np
+    x, y, w, h = box
+    patch = image.crop((x, y, x+w, y+h)).convert("RGB")
+    patch.thumbnail((256, 256))
+    scale_x, scale_y = w/patch.width, h/patch.height
+    w, h = patch.size
+    pixels = np.asarray(patch)
+    background = np.median(np.concatenate((pixels[0], pixels[-1], pixels[:, 0], pixels[:, -1])), axis=0)
+    foreground = np.max(np.abs(pixels.astype(float)-background), axis=2) > 35
+    # Fixed palette bins keep tracing deterministic and remove antialias texture.
+    colors = np.minimum((pixels.astype("uint16")//48)*48+24, 255)
+    paths = []
+    for color in np.unique(colors[foreground], axis=0):
+        mask = (foreground & np.all(colors == color, axis=2)).astype('uint8')
+        # Trace pixel boundaries; omit collinear vertices to keep paths compact.
+        edges = {}
+        for row, column in np.argwhere(mask):
+            a, b = int(column), int(row)
+            for start, end, outside in (
+                ((a,b),(a+1,b), b == 0 or not mask[b-1,a]),
+                ((a+1,b),(a+1,b+1), a == w-1 or not mask[b,a+1]),
+                ((a+1,b+1),(a,b+1), b == h-1 or not mask[b+1,a]),
+                ((a,b+1),(a,b), a == 0 or not mask[b,a-1]),
+            ):
+                if outside:
+                    edges.setdefault(start, []).append(end)
+        segments = []
+        while edges:
+            start = next(iter(edges))
+            points, current = [start], start
+            while current in edges:
+                following = edges[current].pop()
+                if not edges[current]:
+                    del edges[current]
+                current = following
+                if current == start:
+                    break
+                points.append(current)
+            if current != start or len(points) < 4:
+                continue
+            simple = [point for i, point in enumerate(points)
+                      if (point[0]-points[i-1][0], point[1]-points[i-1][1]) !=
+                         (points[(i+1)%len(points)][0]-point[0], points[(i+1)%len(points)][1]-point[1])]
+            if len(simple) >= 3:
+                segments.append("M"+" L".join(f"{x+a*scale_x:g} {y+b*scale_y:g}" for a, b in simple)+" Z")
+        if segments:
+            paths.append({"d": " ".join(segments), "fill": "#%02x%02x%02x" % tuple(color)})
+    return Node("capture-artwork", box, vector_data={"paths": paths})
+
+
+def ink_box(image, box):
+    """UIA bounds include line spacing; recover only the visible foreground ink."""
+    import numpy as np
+    x, y, w, h = box
+    pixels = np.asarray(image.crop((x, y, x+w, y+h)).convert("RGB"))
+    background = np.median(pixels.reshape(-1, 3), axis=0)
+    mask = np.max(np.abs(pixels.astype(float)-background), axis=2) > 45
+    ys, xs = np.where(mask)
+    if len(xs):
+        return (x+int(xs.min()), y+int(ys.min()), int(xs.max()-xs.min()+1), int(ys.max()-ys.min()+1))
+    return None
+
+
 def merge_uia(scene, image, snapshot):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
@@ -113,7 +183,20 @@ def merge_uia(scene, image, snapshot):
     ocr = [n for n in flatten(scene) if n.kind == "text"]
     chrome_boxes = [local_box(n["bounds"], snapshot) for n in items if id(n) in chrome]
     suppressed = {id(n) for n in ocr if any(contains(b, n.box) for b in chrome_boxes)}
-    controls, text_nodes = [], []
+    controls, text_nodes, artwork = [], [], []
+    text_boxes = [local_box(n["bounds"], snapshot) for n in items if kind(n) == "text"]
+    authoritative = [local_box(n["bounds"], snapshot) for n in items
+                     if kind(n) in {"list", "tree", "appbar", "tab", "header", "statusbar"}
+                     or kind(n) == "edit" and n.get("framework_id") == "XAML"]
+    surfaces = []
+    for item in items:
+        if kind(item) in {"pane", "list", "tree", "appbar", "tab", "header", "statusbar"}:
+            b = local_box(item["bounds"], snapshot)
+            if b[2]*b[3] > 4000:
+                surfaces.append(Node("rect", b, color=sample_color(image, b)))
+    surfaces.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
+    cells = {id(child) for item in items if kind(item) in {"listitem", "dataitem"}
+             for child in walk(item) if kind(child) == "edit"}
     native_caption_buttons = []
     emitted = set()
     passwords = [local_box(n["bounds"], snapshot) for n in items if n.get("password")]
@@ -122,22 +205,24 @@ def merge_uia(scene, image, snapshot):
         text = text.strip("\r\n")
         if not text or not box:
             return
-        matches = [n for n in ocr if id(n) not in suppressed and contains(box, n.box)]
+        if icon_text(text):
+            artwork.append(trace_artwork(image, box))
+            text_boxes.append(box)
+            suppressed.update(id(n) for n in ocr if overlap(n.box, box) > n.box[2]*n.box[3]*.35)
+            return
+        text_boxes.append(box)
+        matches = [n for n in ocr if id(n) not in suppressed and
+                   overlap(box, n.box) > min(n.box[2]*n.box[3], box[2]*box[3])*.35]
         exact = [n for n in matches if normalize(n.text) == normalize(text)]
-        placement = (exact or matches) if kind(owner) == "text" or centered else exact
-        if placement:
-            # UIA controls have padded bounds; OCR gives tighter typographic bounds.
-            chosen = max(placement, key=lambda n: overlap(n.box, box))
-            ink = chosen.box
-        else:
+        placement = exact
+        ink = ink_box(image, box) if kind(owner) == "text" or id(owner) in cells or kind(owner) == "treeitem" else None
+        if not ink and placement:
+            ink = max(placement, key=lambda n: overlap(n.box, box)).box
+        if not ink:
             x, y, w, h = box
             height = min(14, max(7, h-4))
-            if centered:
-                width = min(max(1, w-8), max(8, round(len(text)*height*.52)))
-                ink = (x+(w-width)//2, y+(h-height)//2, width, height)
-            else:
-                width = min(max(1, w), max(8, round(len(text)*height*.52)))
-                ink = (x, y+(h-height)//2, width, height)
+            width = min(max(1, w-8), max(8, round(len(text)*height*.52)))
+            ink = (x+(w-width)//2 if centered else x, y+(h-height)//2, width, height)
         signature = (text, ink)
         if signature in emitted:
             return
@@ -145,7 +230,7 @@ def merge_uia(scene, image, snapshot):
         for n in matches:
             suppressed.add(id(n))
         node = Node("text", ink, text=text, color="#171717",
-                    vector_data={"source": "uia", "uia_id": owner.get("id", "")})
+                    vector_data={"source": "uia", "uia_id": owner.get("id", ""), "font_weight": 400})
         text_nodes.append(node)
 
     for item in items:
@@ -155,7 +240,19 @@ def merge_uia(scene, image, snapshot):
             continue
         if role == "button" and item.get("class_name") == "Button" and item.get("name"):
             native_caption_buttons.append(box)
-        if role in {"button", "splitbutton", "edit", "combobox", "list", "tree", "datagrid", "table", "checkbox", "radiobutton", "tabitem"}:
+        if role == "listitem":
+            name_cells = [n for n in walk(item) if kind(n) == "edit" and id(n) in cells]
+            if name_cells:
+                cell = local_box(name_cells[0]["bounds"], snapshot)
+                if cell and cell[0]-box[0] >= 28:
+                    artwork.append(trace_artwork(image, (box[0], box[1]+2, cell[0]-box[0], max(1,box[3]-4))))
+        if role == "image":
+            artwork.append(trace_artwork(image, box))
+        native = (item.get("class_name") == "Button" and item.get("framework_id") == "Win32"
+                  or not item.get("framework_id"))
+        if ((role in {"button", "splitbutton", "checkbox", "radiobutton"} and native)
+                or role == "edit" and id(item) not in cells
+                or role == "combobox" or role == "tabitem" and native):
             x, y, w, h = box
             shape = {"button": "outlined-button", "splitbutton": "outlined-button", "edit": "outline",
                      "combobox": "dropdown", "tabitem": "tab-active" if item.get("states", {}).get("selected") else "tab"}.get(role, "outline")
@@ -191,7 +288,7 @@ def merge_uia(scene, image, snapshot):
             children = [n for n in walk(item) if n is not item and kind(n) == "text" and not n.get("offscreen")]
             if any(normalize(n.get("name", "")) == normalize(name) for n in children):
                 continue
-            if role == "button" and any(kind(n) == "image" for n in walk(item)):
+            if role == "button" and any(kind(n) in {"image", "text"} for n in walk(item) if n is not item):
                 continue  # The accessible name of an icon button is not a caption.
             if role in {"checkbox", "radiobutton"}:
                 x, y, w, h = box
@@ -199,7 +296,22 @@ def merge_uia(scene, image, snapshot):
                 if w <= pad:
                     continue
                 box = (x+pad, y, w-pad, h)
+            if role == "listitem" and any(kind(n) == "edit" and normalize(str(n.get("states", {}).get("value", ""))) == normalize(name) for n in walk(item)):
+                continue
+            if role == "treeitem":
+                # Shell names include navigation hints absent from the caption.
+                x, y, w, h = box
+                # Shell item bounds describe the caption, with an adjacent icon.
+                if item.get("framework_id") == "Win32" or item.get("framework_id") == "DirectUI":
+                    if x >= 28:
+                        artwork.append(trace_artwork(image, (x-28, y+(h-24)//2, 24, min(24,h))))
+                name = name.removeprefix("Start of Quick Access - ").removeprefix("End of Quick Access - ").removesuffix(" (pinned)")
+            if role in {"button", "radiobutton", "tabitem"} and (not native or box[2] < box[3]*1.8 and len(name) > 3) and not any(normalize(n.text) == normalize(name) for n in ocr if contains(box, n.box)):
+                continue
             emit(name, box, item, centered=role in {"button", "tabitem"})
+        elif role == "splitbutton" and name:
+            if not any(kind(n) == "text" for n in walk(item) if n is not item) and any(normalize(n.text) == normalize(name) for n in ocr if contains(box, n.box)):
+                emit(name, box, item)
         elif role == "edit" and item.get("states", {}).get("value"):
             x, y, w, h = box
             # A multiline edit should expose TextPattern; avoid squeezing its
@@ -208,9 +320,30 @@ def merge_uia(scene, image, snapshot):
             if "\n" not in value and "\r" not in value:
                 emit(value, (x+4, y+2, max(1, w-8), max(1, h-4)), item)
 
+    suppressed.update(id(n) for n in ocr if any(
+        kind(item) == "scrollbar" and contains(local_box(item["bounds"], snapshot), n.box)
+        for item in items))
+    suppressed.update(id(n) for n in ocr if any(overlap(n.box, a.box) > n.box[2]*n.box[3]*.35 for a in artwork))
+    for n in ocr:
+        if n.box[1] < 45 and n.box[0] > image.width-160 and len(n.text) <= 2:
+            artwork.append(trace_artwork(image, n.box))
+            suppressed.add(id(n))
+
     def prune(node):
         retained = []
         for child in node.children:
+            if child.kind == "text" and any(overlap(child.box, b) > child.box[2]*child.box[3]*.35 for b in text_boxes):
+                continue
+            if child.kind != "text" and sum(overlap(b, child.box) for b in authoritative) > child.box[2]*child.box[3]*.15:
+                for sub in child.children:
+                    prune(sub)
+                    if sub.kind == "text" and id(sub) not in suppressed:
+                        retained.append(sub)
+                continue
+            if child.kind != "text" and not child.children and any(contains(b, child.box) for b in text_boxes + [n.box for n in artwork] + [local_box(n["bounds"], snapshot) for n in items if kind(n) == "scrollbar"]):
+                continue
+            if child.kind in {"outline", "input-field", "dropdown"} and any(overlap(b, child.box) > child.box[2]*child.box[3]*.3 for b in text_boxes):
+                continue
             if child.kind == "header-icon" and any(contains(b, child.box) for b in native_caption_buttons):
                 # This detector fits a large window illustration; it can falsely
                 # fit a native button's rectangular border and caption strokes.
@@ -233,10 +366,11 @@ def merge_uia(scene, image, snapshot):
         node.children = retained
     prune(scene)
     # Insert outlines after underlying panels; to_svg puts root text above them.
-    surfaces = {"content-panel", "dialog-panel", "window-header", "footer-panel", "rect", "decorative-background", "selected-row", "text-selection"}
+    surface_kinds = {"content-panel", "dialog-panel", "window-header", "footer-panel", "rect", "decorative-background", "selected-row", "text-selection"}
     controls.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
-    scene.children = ([n for n in scene.children if n.kind in surfaces] + controls
-                      + [n for n in scene.children if n.kind not in surfaces] + text_nodes)
+    scene.children = (surfaces + [n for n in scene.children if n.kind in surface_kinds and
+                                   not any(contains(b, n.box) for b in authoritative)] + controls
+                      + [n for n in scene.children if n.kind not in surface_kinds] + artwork + text_nodes)
     return scene
 
 
@@ -277,7 +411,12 @@ def semantic_svg(scene, snapshot, font_family="auto"):
     parts = [start+">", f'<title id="capture-title">{escape(title)}</title>',
              '<desc id="capture-description">Static window capture. Represented controls are informational and cannot be operated.</desc>',
              '<metadata id="uia-snapshot">'+escape(json.dumps(snapshot, ensure_ascii=False))+'</metadata>',
-             '<g aria-hidden="true" data-kind="visual-reconstruction">', body.rsplit("</svg>", 1)[0], '</g>']
+             '<g aria-hidden="true" data-kind="visual-reconstruction">', body.rsplit("</svg>", 1)[0]]
+    for node in flatten(scene):
+        if node.kind == "capture-artwork":
+            for path in node.vector_data["paths"]:
+                parts.append(f'<path data-kind="capture-artwork" d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"/>')
+    parts.append('</g>')
     serial = 0
 
     def accessible(item):

@@ -23,6 +23,22 @@ from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
 
 
 class PipelineTest(unittest.TestCase):
+    def test_thresholded_ocr_recovers_small_dialog_labels(self):
+        image=Image.new("RGB",(457,251),"#f0f0f0")
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((1,1,455,30),fill="white")
+        draw.rectangle((13,106,348,125),fill="#e1e1e1",outline="#adadad")
+        draw.rectangle((13,156,348,210),fill="white",outline="#707070")
+        draw.rectangle((357,106,443,125),fill="#e1e1e1",outline="#adadad")
+        font=ImageFont.truetype("DejaVuSans.ttf",10)
+        draw.text((16,109),"ERIC-DESKTOP",font=font,fill="#222222")
+        draw.text((15,158),"administrators",font=font,fill="#222222")
+        draw.text((371,110),"Locations...",font=font,fill="#222222")
+        scene=reconstruct(image,Options())
+        labels={n.text for n in flatten(scene) if n.kind=="text"}
+        self.assertIn("administrators",labels)
+        self.assertIn("Locations...",labels)
+
     def test_semantic_field_selection_and_footer(self):
         image=Image.new("RGB",(400,206),"white")
         draw=ImageDraw.Draw(image)

@@ -100,6 +100,49 @@ class CaptureTests(unittest.TestCase):
             s = snapshot(); s['image_size'] = [5, 5]; uia.write_text(json.dumps(s))
             self.assertEqual(main([str(output), '--image', str(image), '--uia', str(uia), '--no-ocr']), 1)
 
+    def test_table_cells_and_icon_buttons_are_not_painted_as_form_controls(self):
+        s = snapshot()
+        row = element(50007, 'report.PNG', [110, 250, 270, 30], framework_id='DirectUI')
+        cell = element(50004, 'Name', [140, 250, 180, 30], framework_id='DirectUI')
+        cell['states'] = {'value': 'report.PNG'}
+        row['children'] = [cell]
+        button = element(50000, 'Back', [110, 205, 30, 30], framework_id='XAML', class_name='Button')
+        glyph = element(50020, '\ue72b', [115, 210, 18, 18], framework_id='XAML', class_name='Button')
+        glyph['text_ranges'] = [{'text': '\ue72b', 'rectangles': [[115, 210, 18, 18]]}]
+        button['children'] = [glyph]
+        s['root']['children'] = [row, button]
+        scene = Node('root', (0, 0, 300, 180), color='#ffffff')
+        merge_uia(scene, Image.new('RGB', (300, 180), 'white'), s)
+        nodes = list(flatten(scene))
+        self.assertEqual([n.text for n in nodes if n.kind == 'text'], ['report.PNG'])
+        self.assertFalse(any(n.kind in {'outline', 'outlined-button'} for n in nodes))
+        self.assertTrue(any(n.kind == 'capture-artwork' for n in nodes))
+        self.assertIn('Back', semantic_svg(scene, s))
+
+    def test_ocr_line_spanning_icons_and_caption_is_replaced(self):
+        s = snapshot()
+        s['root']['children'] = [element(50020, 'Details', [330, 220, 55, 24])]
+        scene = Node('root', (0, 0, 300, 180), children=[
+            Node('text', (100, 25, 180, 14), text='eee C3 Details')])
+        merge_uia(scene, Image.new('RGB', (300, 180), 'white'), s)
+        self.assertEqual([n.text for n in flatten(scene) if n.kind == 'text'], ['Details'])
+
+    def test_bright_artwork_keeps_color_and_transparent_holes(self):
+        from svgshot.capture import trace_artwork
+        image = Image.new('RGB', (30, 30), '#191919')
+        image.paste('#ffff00', (3, 3, 27, 27))
+        image.paste('#191919', (10, 10, 20, 20))
+        artwork = trace_artwork(image, (0, 0, 30, 30))
+        self.assertTrue(any(p['fill'] == '#ffff18' for p in artwork.vector_data['paths']))
+        scene = Node('root', (0, 0, 30, 30), color='#191919', children=[artwork])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'artwork.svg'
+            path.write_text(semantic_svg(scene, snapshot()))
+            rendered = render(str(path), 30).convert('RGB')
+            self.assertEqual(rendered.getpixel((15,15)), (25,25,25))
+            self.assertGreater(rendered.getpixel((5,5))[0], 240)
+            self.assertLess(rendered.getpixel((5,5))[2], 50)
+
     def test_password_ocr_is_not_emitted(self):
         s = snapshot()
         item = element(50004, 'Password', [120, 225, 90, 30], password=True)
