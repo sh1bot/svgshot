@@ -1,0 +1,50 @@
+name: Windows capture
+on:
+  push:
+  pull_request:
+jobs:
+  native:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Windows SDK helper
+        run: cmake -S capture/windows -B build/capture -A ${{ matrix.arch }}
+      - name: Build
+        run: cmake --build build/capture --config Release
+      - name: Exercise UIA, window capture, and PNG encoding
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $fixture = Start-Process build/capture/Release/svgshot-capture-win.exe -ArgumentList '--fixture' -PassThru
+          try {
+            for ($i = 0; $i -lt 40; $i++) {
+              $fixture.Refresh()
+              if ($fixture.MainWindowHandle -ne 0) { break }
+              Start-Sleep -Milliseconds 100
+            }
+            if ($fixture.MainWindowHandle -eq 0) { throw 'Fixture window did not open' }
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke --uia-only
+            if ($LASTEXITCODE -ne 0) { throw 'UIA snapshot failed' }
+            $snapshot = Get-Content -Raw build/smoke.uia.json | ConvertFrom-Json
+            if ($snapshot.root.name -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
+            $raw = Get-Content -Raw build/smoke.uia.json
+            if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"toggle":1')) { throw 'Missing control semantics' }
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live
+            if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
+            Add-Type -AssemblyName System.Drawing
+            $png = [System.Drawing.Image]::FromFile((Resolve-Path build/live.png))
+            try {
+              $live = Get-Content -Raw build/live.uia.json | ConvertFrom-Json
+              if ($live.image_size[0] -ne $png.Width -or $live.image_size[1] -ne $png.Height) { throw 'PNG/UIA dimensions differ' }
+            } finally { $png.Dispose() }
+          } finally { Stop-Process -Id $fixture.Id -ErrorAction SilentlyContinue }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: svgshot-capture-${{ matrix.arch }}
+          path: |
+            build/capture/Release/svgshot-capture-win.exe
+            build/live.png
+            build/live.uia.json

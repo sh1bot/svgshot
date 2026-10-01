@@ -122,6 +122,8 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                                   3 if node.vector_data.get("role")=="link" else 4.4)
             size, baseline = text_layout(node, font_family)
             weight = ' font-weight="600"' if 14.5 <= size < 22 and len(node.text) < 30 else ""
+            if "font_weight" in node.vector_data:
+                weight = f' font-weight="{int(node.vector_data["font_weight"])}"'
             parts.append(f'<text x="{x}" y="{baseline:g}" fill="{paint}" '
                          f'font-family="{escape(resolved_family(font_family), quote=True)},sans-serif" font-size="{size:g}"'
                          f' textLength="{w}" lengthAdjust="spacingAndGlyphs"{weight}>'
