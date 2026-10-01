@@ -182,6 +182,31 @@ struct Builder
                 }
             }
         }
+        for (auto const &p : n.GetNamedObject(L"properties", object()))
+        {
+            auto name = propertyNames.GetNamedString(p.Key(), L"");
+            auto record = p.Value().GetObject();
+            for (auto const &f : std::map<std::wstring, std::wstring>{
+                     {L"Name", L"label"},
+                     {L"HelpText", L"help"},
+                     {L"LocalizedControlType", L"role_description"},
+                     {L"FullDescription", L"description"},
+                     {L"BoundingRectangle", L"bounds"}})
+            {
+                if (name != f.first && name != L"UIA_" + f.first + L"PropertyId" &&
+                    name != f.first + L"Property")
+                    continue;
+                if (record.GetNamedString(L"status", L"") != L"value")
+                {
+                    if (f.second != L"bounds" && o.HasKey(f.second))
+                        o.Remove(f.second);
+                    fieldStatus.Insert(f.second, record);
+                }
+                else if (f.second == L"description" &&
+                         record.GetNamedValue(L"value").ValueType() == JsonValueType::String)
+                    o.Insert(f.second, record.GetNamedValue(L"value"));
+            }
+        }
         if (fieldStatus.Size())
             o.Insert(L"field_status", fieldStatus);
         o.Insert(L"states", states);

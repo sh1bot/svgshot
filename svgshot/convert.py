@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import subprocess
 from .grab import add_options, capture_bytes, options
 from .snapshot import read_snapshot
 from .schema import from_uia
@@ -67,7 +68,7 @@ def main(argv=None):
         for warning in snapshot.get('warnings',[]):
             print('svgshot convert: '+warning,file=sys.stderr)
         return 0
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f'svgshot convert: {error}',file=sys.stderr)
         return 1
 

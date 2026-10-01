@@ -112,6 +112,20 @@ def from_uia(snapshot):
             if field and record.get('status') != 'value':
                 out['states'].pop(field, None)
                 statuses['states.'+field] = deepcopy(record)
+        for key, record in n.get('properties', {}).items():
+            prop = snapshot.get('property_names', {}).get(key, '')
+            field = next((dst for src,dst in [('Name','label'),('HelpText','help'),
+                         ('LocalizedControlType','role_description'),('FullDescription','description'),
+                         ('BoundingRectangle','bounds')]
+                         if prop in (src, 'UIA_'+src+'PropertyId', src+'Property')), None)
+            if not field:
+                continue
+            if record.get('status') != 'value':
+                if field != 'bounds':
+                    out.pop(field,None)
+                statuses[field] = deepcopy(record)
+            elif field == 'description' and isinstance(record.get('value'),str):
+                out[field] = record['value']
         if statuses:
             out['field_status'] = statuses
         return out

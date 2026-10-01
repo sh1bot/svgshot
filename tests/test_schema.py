@@ -12,10 +12,10 @@ from svgshot.convert import main
 
 def legacy():
     return {'version':2,'screen_bounds':[100,200,200,100],'image_size':[400,200],
-      'capture_policy':{},'property_names':{'1':'IsEnabled'},'pattern_names':{},
+      'capture_policy':{},'property_names':{'1':'IsEnabled','2':'HelpText'},'pattern_names':{},
       'root':{'id':'uia-a','control_type':50032,'bounds':[100,200,200,100],'name':'Window',
        'children':[{'id':'uia-b','control_type':50002,'bounds':[110,220,100,30],
-       'name':'Keep','enabled':False,'properties':{'1':{'status':'error'}},'states':{'toggle':2},
+       'name':'Keep','enabled':False,'properties':{'1':{'status':'error'},'2':{'status':'not_supported'}},'states':{'toggle':2},
        'text_ranges':[{'text':'nnn','rectangles':[[110,220,100,30]],'attributes':{'40008':{'status':'value','value':0x6a5fff}}}],
        'text_capture':{'status':'value'},'children':[]} ]}}
 
@@ -28,6 +28,8 @@ class UnifiedSchemaTests(unittest.TestCase):
         self.assertEqual(child['bounds'],[20,40,200,60])
         self.assertEqual(child['states']['checked'],'mixed')
         self.assertNotIn('enabled',child['states'])
+        self.assertNotIn('help',child)
+        self.assertEqual(child['field_status']['help']['status'],'not_supported')
         self.assertEqual(child['field_status']['states.enabled']['status'],'error')
         self.assertEqual(child['text']['lines'][0]['style']['foreground'],'#ff5f6a')
         self.assertEqual(render_view(s)['root']['children'][0]['states']['toggle'],2)
