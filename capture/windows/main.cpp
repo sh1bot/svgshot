@@ -106,6 +106,36 @@ template <typename T> com_ptr<T> pattern(IUIAutomationElement *e, PATTERNID id)
 #include "uia_data.h"
 #include "png_snapshot.h"
 
+HRESULT clip_to_visible_range(IUIAutomationTextRange *range, IUIAutomationTextRange *viewport)
+{
+    int cmp = 0;
+    HRESULT hr = range->CompareEndpoints(TextPatternRangeEndpoint_Start, viewport,
+                                         TextPatternRangeEndpoint_Start, &cmp);
+    if (FAILED(hr))
+        return hr;
+    if (cmp < 0)
+    {
+        hr = range->MoveEndpointByRange(TextPatternRangeEndpoint_Start, viewport,
+                                        TextPatternRangeEndpoint_Start);
+        if (FAILED(hr))
+            return hr;
+    }
+    hr = range->CompareEndpoints(TextPatternRangeEndpoint_End, viewport,
+                                 TextPatternRangeEndpoint_End, &cmp);
+    if (FAILED(hr))
+        return hr;
+    if (cmp > 0)
+    {
+        hr = range->MoveEndpointByRange(TextPatternRangeEndpoint_End, viewport,
+                                        TextPatternRangeEndpoint_End);
+        if (FAILED(hr))
+            return hr;
+    }
+    hr = range->CompareEndpoints(TextPatternRangeEndpoint_Start, range,
+                                 TextPatternRangeEndpoint_End, &cmp);
+    return FAILED(hr) ? hr : cmp >= 0 ? S_FALSE : S_OK;
+}
+
 std::string range_details(IUIAutomationTextRange *range, UiaData &data)
 {
     if (data.hidden_text(range))
@@ -187,8 +217,10 @@ std::string format_runs(IUIAutomationTextRange *range, UiaData &data, int &budge
     HRESULT hr = range->Clone(run.put());
     if (FAILED(hr))
         return UiaData::failure(hr);
-    run->MoveEndpointByRange(TextPatternRangeEndpoint_End, run.get(),
-                             TextPatternRangeEndpoint_Start);
+    hr = run->MoveEndpointByRange(TextPatternRangeEndpoint_End, run.get(),
+                                  TextPatternRangeEndpoint_Start);
+    if (FAILED(hr))
+        return UiaData::failure(hr);
     std::string out = "{\"status\":\"value\",\"ranges\":[";
     bool comma = false, truncated = false;
     while (true)
@@ -210,8 +242,12 @@ std::string format_runs(IUIAutomationTextRange *range, UiaData &data, int &budge
         run->CompareEndpoints(TextPatternRangeEndpoint_End, range, TextPatternRangeEndpoint_End,
                               &cmp);
         if (cmp > 0)
-            run->MoveEndpointByRange(TextPatternRangeEndpoint_End, range,
-                                     TextPatternRangeEndpoint_End);
+        {
+            hr = run->MoveEndpointByRange(TextPatternRangeEndpoint_End, range,
+                                          TextPatternRangeEndpoint_End);
+            if (FAILED(hr))
+                break;
+        }
         run->CompareEndpoints(TextPatternRangeEndpoint_Start, run.get(),
                               TextPatternRangeEndpoint_End, &cmp);
         if (cmp >= 0)
@@ -285,22 +321,7 @@ std::string text_selection(IUIAutomationElement *e, UiaData &data, bool include_
                 visible->GetElement(j, viewport.put());
                 if (!viewport)
                     continue;
-                int cmp = 0;
-                if (FAILED(range->CompareEndpoints(TextPatternRangeEndpoint_Start, viewport.get(),
-                                                   TextPatternRangeEndpoint_Start, &cmp)))
-                    continue;
-                if (cmp < 0)
-                    range->MoveEndpointByRange(TextPatternRangeEndpoint_Start, viewport.get(),
-                                               TextPatternRangeEndpoint_Start);
-                if (FAILED(range->CompareEndpoints(TextPatternRangeEndpoint_End, viewport.get(),
-                                                   TextPatternRangeEndpoint_End, &cmp)))
-                    continue;
-                if (cmp > 0)
-                    range->MoveEndpointByRange(TextPatternRangeEndpoint_End, viewport.get(),
-                                               TextPatternRangeEndpoint_End);
-                range->CompareEndpoints(TextPatternRangeEndpoint_Start, range.get(),
-                                        TextPatternRangeEndpoint_End, &cmp);
-                if (cmp >= 0)
+                if (clip_to_visible_range(range.get(), viewport.get()) != S_OK)
                     continue;
             }
             if (comma)
@@ -346,9 +367,15 @@ std::string text_ranges(IUIAutomationElement *e, UiaData &data, std::string &sta
             continue;
         if (FAILED(visible->Clone(line.put())) || !line)
             continue;
-        line->MoveEndpointByRange(TextPatternRangeEndpoint_End, visible.get(),
-                                  TextPatternRangeEndpoint_Start);
-        line->ExpandToEnclosingUnit(TextUnit_Line);
+        HRESULT line_hr = line->MoveEndpointByRange(TextPatternRangeEndpoint_End, visible.get(),
+                                                    TextPatternRangeEndpoint_Start);
+        if (SUCCEEDED(line_hr))
+            line_hr = line->ExpandToEnclosingUnit(TextUnit_Line);
+        if (FAILED(line_hr))
+        {
+            status = UiaData::failure(line_hr);
+            continue;
+        }
         while (budget-- > 0)
         {
             int cmp = 0;
@@ -359,16 +386,12 @@ std::string text_ranges(IUIAutomationElement *e, UiaData &data, std::string &sta
             com_ptr<IUIAutomationTextRange> clipped;
             if (FAILED(line->Clone(clipped.put())))
                 break;
-            clipped->CompareEndpoints(TextPatternRangeEndpoint_Start, visible.get(),
-                                      TextPatternRangeEndpoint_Start, &cmp);
-            if (cmp < 0)
-                clipped->MoveEndpointByRange(TextPatternRangeEndpoint_Start, visible.get(),
-                                             TextPatternRangeEndpoint_Start);
-            clipped->CompareEndpoints(TextPatternRangeEndpoint_End, visible.get(),
-                                      TextPatternRangeEndpoint_End, &cmp);
-            if (cmp > 0)
-                clipped->MoveEndpointByRange(TextPatternRangeEndpoint_End, visible.get(),
-                                             TextPatternRangeEndpoint_End);
+            HRESULT clip_hr = clip_to_visible_range(clipped.get(), visible.get());
+            if (FAILED(clip_hr))
+            {
+                status = UiaData::failure(clip_hr);
+                break;
+            }
             if (data.hidden_text(clipped.get()))
             {
                 if (comma)
