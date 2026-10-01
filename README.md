@@ -4,16 +4,29 @@
 controls become SVG elements; complex imagery may remain embedded in the SVG as
 small PNG regions. The result is an approximation, so check it before publishing.
 
-## Install
+## Install and run
 
-Use Python 3.10 or later for conversion. From a checkout:
+Use Python 3.10 or later. From the checkout, install the Python dependencies:
+
+```sh
+python -m pip install Pillow numpy scipy
+```
+
+Run the script directly from the checkout:
+
+```sh
+python -m svgshot.cli screenshot.png screenshot.svg
+```
+
+To install the `svgshot` command in a virtual environment:
 
 ```sh
 python -m venv .venv
 .venv/bin/python -m pip install -e .
+.venv/bin/svgshot screenshot.png screenshot.svg
 ```
 
-On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+On Windows, use `.venv\Scripts\python.exe` and `.venv\Scripts\svgshot.exe`.
 
 Screenshot conversion uses Tesseract OCR. Install Tesseract for your operating
 system and make it available on `PATH`. Inkscape is optional; it is needed for
