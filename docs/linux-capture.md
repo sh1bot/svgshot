@@ -6,7 +6,7 @@ AT-SPI2 and captures pixels from X11. Python is not required by the helper.
 On Debian, install the runtime libraries with:
 
 ```sh
-sudo apt install libatspi2.0-0 libx11-6 libpng16-16 libjson-c5 zlib1g
+sudo apt install libatspi2.0-0 libx11-6 libpng16-16 libjson-c5 zlib1g libstdc++6
 ```
 
 On Ubuntu 24.04, the AT-SPI2 and PNG packages are named

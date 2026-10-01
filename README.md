@@ -96,7 +96,7 @@ python -m svgshot.snapshot capture.png --json capture.json
 |---|---|---|
 | Windows | Windows 10 1903 or later |
 | macOS | macOS 14 or later; Accessibility and Screen Recording permissions |
-| Linux | AT-SPI2, X11, libpng, json-c and zlib system libraries |
+| Linux | AT-SPI2, X11, libpng, json-c, zlib and libstdc++ system libraries |
 
 To build a capture helper locally, see the platform CMake/Swift sources under
 `capture/`. Linux-specific setup and Wayland behavior are described in the

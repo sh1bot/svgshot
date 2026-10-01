@@ -24,10 +24,11 @@ export PKG_CONFIG_LIBDIR="/usr/lib/$pkg_triple/pkgconfig:/usr/share/pkgconfig"
 cmake -S capture/linux -B "build/linux-$target_arch" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux \
   -DCMAKE_CXX_COMPILER="$triple-g++" \
-  -DCMAKE_EXE_LINKER_FLAGS='-static-libstdc++ -static-libgcc'
+  -DCMAKE_EXE_LINKER_FLAGS=''
 cmake --build "build/linux-$target_arch" -j2
 mkdir -p dist
 cp "build/linux-$target_arch/svgshot-capture-linux" "dist/svgshot-capture-linux-$target_arch"
+"$triple-strip" --strip-unneeded "dist/svgshot-capture-linux-$target_arch"
 if [ "$target_arch" = x86_64 ]; then
   test "$(dist/svgshot-capture-linux-x86_64 --version)" = "svgshot-capture-linux $(git rev-parse HEAD)"
   dist/svgshot-capture-linux-x86_64 --help
