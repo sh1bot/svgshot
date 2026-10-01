@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(svgshot_capture_linux LANGUAGES CXX)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(CAPTURE REQUIRED IMPORTED_TARGET atspi-2 x11 libpng json-c zlib)
+pkg_check_modules(CAPTURE REQUIRED IMPORTED_TARGET atspi-2 gobject-2.0 glib-2.0 x11 libpng json-c zlib)
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   OUTPUT_VARIABLE SVGSHOT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 if(NOT SVGSHOT_COMMIT)

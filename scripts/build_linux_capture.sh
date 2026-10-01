@@ -14,7 +14,7 @@ esac
 dpkg --add-architecture "$deb_arch"
 apt-get -o Acquire::Retries=3 update
 apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-  cmake pkg-config git "$compiler" "libatspi2.0-dev:$deb_arch" \
+  cmake make pkg-config git "$compiler" "libatspi2.0-dev:$deb_arch" \
   "libx11-dev:$deb_arch" "libpng-dev:$deb_arch" "libjson-c-dev:$deb_arch" "zlib1g-dev:$deb_arch"
 git config --global --add safe.directory /src
 export PKG_CONFIG_LIBDIR="/usr/lib/$triple/pkgconfig:/usr/share/pkgconfig"
