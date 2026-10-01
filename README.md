@@ -93,7 +93,7 @@ python -m svgshot.snapshot capture.png --json capture.json
 ## Capture platforms
 
 | Platform | Requirements |
-|---|---|---|
+|---|---|
 | Windows | Windows 10 1903 or later |
 | macOS | macOS 14 or later; Accessibility and Screen Recording permissions |
 | Linux | AT-SPI2, X11, libpng, json-c, zlib and libstdc++ system libraries |
