@@ -65,6 +65,42 @@ if len(sys.argv)>1:
     assert compatible['warnings'], 'Missing compatibility capture warning'
     assert 'PasswordHiddenSentinel' not in json.dumps(compatible)
     Path('build/compatibility.png').write_bytes(compatibility.stdout)
+    # Exercise the visible-screen fallback and ensure it refuses other windows'
+    # pixels. Raise the fixture only in this test; the capture tool must not do so.
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+        wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.DestroyWindow.argtypes = [wintypes.HWND]
+    hwnd = int(sys.argv[1], 0)
+    assert user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, 0x13), 'Cannot raise fixture'
+    screen = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
+        '--screen', '--stdout'], stdout=subprocess.PIPE, check=True, timeout=30)
+    visible = read_snapshot(io.BytesIO(screen.stdout))
+    validate(visible)
+    assert visible['capture_policy']['bitmap_method'] == 'screen'
+    assert visible['root']['label'] == 'svgshot Capture Fixture'
+    assert 'PasswordHiddenSentinel' not in json.dumps(visible)
+    Path('build/screen.png').write_bytes(screen.stdout)
+    rectangle = wintypes.RECT()
+    assert user32.GetWindowRect(hwnd, ctypes.byref(rectangle))
+    overlay = user32.CreateWindowExW(0x88, 'STATIC', 'Occlusion sentinel', 0x90000000,
+        rectangle.left + 20, rectangle.top + 40, 64, 64, None, None, None, None)
+    assert overlay, 'Cannot create overlapping fixture'
+    try:
+        rejected = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
+            '--screen', '--stdout'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        assert rejected.returncode != 0, 'Obscured window captured'
+        assert not rejected.stdout, 'Failed capture emitted image data'
+        assert b'unobscured window' in rejected.stderr, rejected.stderr
+    finally:
+        user32.DestroyWindow(overlay)
     # An omitted output path must resolve to the actual Desktop folder and use
     # a dated, titled PNG filename. Do not leave CI test captures on the Desktop.
     result=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1]],
@@ -78,4 +114,4 @@ if len(sys.argv)>1:
         validate(read_snapshot(generated))
     finally:
         generated.unlink(missing_ok=True)
-    print('Validated compatibility capture and automatic Desktop filename')
+    print('Validated compatibility and screen capture, occlusion refusal, and automatic Desktop filename')

@@ -978,8 +978,88 @@ SIZE capture_printwindow(HWND hwnd, std::string &png)
     png = std::move(result->png);
     return result->size;
 }
-SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility)
+void require_unobscured(HWND hwnd, RECT rectangle)
 {
+    // Screen fallback samples the desktop composition, so refuse overlapping
+    // windows rather than embedding their pixels with this target's semantics.
+    // Check on both sides of the copy; composition is not an atomic UI snapshot.
+    DWORD cloaked = 0;
+    DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+    if (cloaked) throw std::runtime_error("Target is not visible on the current desktop");
+    struct Visibility { HWND target; RECT rectangle; bool found = false, blocked = false; } state{hwnd, rectangle};
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
+        auto &s = *reinterpret_cast<Visibility *>(parameter);
+        if (window == s.target) { s.found = true; return FALSE; }
+        if (!IsWindowVisible(window) || IsIconic(window)) return TRUE;
+        DWORD cloaked = 0;
+        DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+        if (cloaked) return TRUE;
+        RECT r{}, overlap{};
+        if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))) &&
+            !GetWindowRect(window, &r)) return TRUE;
+        if (IntersectRect(&overlap, &r, &s.rectangle)) { s.blocked = true; return FALSE; }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&state));
+    if (state.blocked)
+        throw std::runtime_error("Visible-screen capture requires an unobscured window; move overlapping windows away and try again");
+    if (!state.found || !IsWindowVisible(hwnd) || IsIconic(hwnd))
+        throw std::runtime_error("Target is not a visible top-level window");
+}
+SIZE capture_screen(HWND hwnd, std::string &png)
+{
+    DWORD affinity = 0;
+    if (GetWindowDisplayAffinity(hwnd, &affinity) && affinity != WDA_NONE)
+        throw std::runtime_error("Window excludes its content from capture");
+    RECT r = bounds(hwnd);
+    LONG w = r.right - r.left, h = r.bottom - r.top;
+    RECT desktop{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0};
+    desktop.right = desktop.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    desktop.bottom = desktop.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (w <= 0 || h <= 0 || static_cast<uint64_t>(w) * h > 64 * 1024 * 1024 ||
+        r.left < desktop.left || r.top < desktop.top || r.right > desktop.right || r.bottom > desktop.bottom)
+        throw std::runtime_error("Visible-screen capture requires the whole window to be on screen");
+    require_unobscured(hwnd, r);
+    struct Surface
+    {
+        HDC screen = GetDC(nullptr), dc = nullptr;
+        HBITMAP bitmap = nullptr;
+        HGDIOBJ old = nullptr;
+        ~Surface() {
+            if (old) SelectObject(dc, old);
+            if (bitmap) DeleteObject(bitmap);
+            if (dc) DeleteDC(dc);
+            if (screen) ReleaseDC(nullptr, screen);
+        }
+    } surface;
+    if (!surface.screen || !(surface.dc = CreateCompatibleDC(surface.screen)))
+        throw std::runtime_error("Cannot create screen capture DC");
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = w; info.bmiHeader.biHeight = -h;
+    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void *pixels = nullptr;
+    surface.bitmap = CreateDIBSection(surface.dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    if (!surface.bitmap || !pixels) throw std::runtime_error("Cannot allocate screen bitmap");
+    surface.old = SelectObject(surface.dc, surface.bitmap);
+    if (!surface.old || surface.old == HGDI_ERROR) {
+        surface.old = nullptr; throw std::runtime_error("Cannot select screen bitmap");
+    }
+    check_step(DwmFlush(), "Flush desktop composition");
+    if (!BitBlt(surface.dc, 0, 0, w, h, surface.screen, r.left, r.top, SRCCOPY | CAPTUREBLT))
+        throw std::runtime_error("Screen BitBlt failed (Windows error " + std::to_string(GetLastError()) + ")");
+    if (!GdiFlush()) throw std::runtime_error("Cannot flush screen bitmap");
+    require_unobscured(hwnd, r);
+    RECT after = bounds(hwnd);
+    if (!EqualRect(&r, &after)) throw std::runtime_error("Window moved during screen capture; try again");
+    auto data = static_cast<BYTE *>(pixels);
+    for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4) data[i] = 255;
+    png = save_png(w, h, w * 4, data);
+    return {w, h};
+}
+SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility, bool &screenCapture)
+{
+    if (screenCapture) return capture_screen(hwnd, png);
     if (compatibility)
         return capture_printwindow(hwnd, png);
     if (!capture::GraphicsCaptureSession::IsSupported())
@@ -1012,9 +1092,9 @@ SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility)
                   << ", exstyle=0x" << GetWindowLongPtrW(hwnd, GWL_EXSTYLE) << std::dec
                   << ", owned=" << (GetWindow(hwnd, GW_OWNER) != nullptr)
                   << ", valid=" << IsWindow(hwnd) << ", visible=" << IsWindowVisible(hwnd) << '\n';
-        compatibility = true;
-        return capture_step("WGC CreateForWindow rejected this window (0x80070057); PrintWindow fallback",
-                            [&] { return capture_printwindow(hwnd, png); });
+        screenCapture = true;
+        return capture_step("WGC CreateForWindow rejected this window (0x80070057); visible-screen fallback",
+                            [&] { return capture_screen(hwnd, png); });
     }
     check_step(hr, "WGC CreateForWindow");
     auto pool = capture_step("WGC CreateFreeThreaded", [&] {
@@ -1202,7 +1282,7 @@ int wmain(int argc, wchar_t **argv)
         HWND hwnd = nullptr;
         std::filesystem::path outputPath;
         bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false,
-             stdoutPng = false, compatibility = false;
+             stdoutPng = false, compatibility = false, screenCapture = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -1223,6 +1303,8 @@ int wmain(int argc, wchar_t **argv)
                 stdoutPng = true;
             else if (arg == L"--print-window")
                 compatibility = true;
+            else if (arg == L"--screen")
+                screenCapture = true;
             else if (arg == L"--json")
                 jsonExport = true;
             else if (arg == L"--uia-only")
@@ -1235,6 +1317,7 @@ int wmain(int argc, wchar_t **argv)
                              "cancels. "
                              "Without a filename, save a dated PNG on the Desktop. --out FILE.png "
                              "also sets the filename. --print-window uses compatibility capture.\n"
+                             "--screen captures the visible area of an unobscured window.\n"
                              "Requires Windows 10 1903+. Use --version for the source commit.\n";
                 return 0;
             }
@@ -1255,6 +1338,7 @@ int wmain(int argc, wchar_t **argv)
             throw std::runtime_error("--stdout cannot be combined with file output options");
         if (delay < 0 || delay > 60)
             throw std::runtime_error("Delay must be between 0 and 60 seconds");
+        if (compatibility && screenCapture) throw std::runtime_error("Choose --print-window or --screen");
         if (hwnd && foreground)
             throw std::runtime_error("Choose --hwnd or --foreground");
         if (delay)
@@ -1278,7 +1362,7 @@ int wmain(int argc, wchar_t **argv)
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
         if (!uiaOnly)
-            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png, compatibility); });
+            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png, compatibility, screenCapture); });
         RECT after = bounds(hwnd);
         if (!EqualRect(&before, &after))
             throw std::runtime_error("Window moved or resized during capture; try again");
@@ -1294,8 +1378,15 @@ int wmain(int argc, wchar_t **argv)
         out << "{\"version\":2,\"screen_bounds\":" << rect_json(before) << ",\"image_size\":["
             << size.cx << ',' << size.cy << "],\"warnings\":[";
         bool warning = false;
+        if (screenCapture && !uiaOnly)
+        {
+            out << "\"Bitmap captured from the selected window's visible screen area.\"";
+            warning = true;
+            std::cerr << "svgshot-capture: using visible-screen capture\n";
+        }
         if (compatibility && !uiaOnly)
         {
+            if (warning) out << ',';
             out << "\"Bitmap captured with PrintWindow compatibility capture; inspect visual content.\"";
             warning = true;
             std::cerr << "svgshot-capture: using PrintWindow compatibility capture\n";
@@ -1329,7 +1420,7 @@ int wmain(int argc, wchar_t **argv)
                "string_characters\":65536,"
                "\"timeout_seconds\":20,\"custom_properties\":\"not_discovered\","
                "\"password_content\":\"redacted\",\"actions_invoked\":false,\"bitmap_method\":\""
-            << (uiaOnly ? "none" : compatibility ? "printwindow" : "wgc")
+            << (uiaOnly ? "none" : screenCapture ? "screen" : compatibility ? "printwindow" : "wgc")
             << "\",\"include_hidden_"
                "content\":"
             << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
