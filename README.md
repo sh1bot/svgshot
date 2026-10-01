@@ -90,17 +90,13 @@ The [schema reference](docs/capture-schema.md) describes its structure and the
 python -m svgshot.snapshot capture.png --json capture.json
 ```
 
-## Supported capture platforms
+## Capture platforms
 
-| Platform | Architectures | Notes |
+| Platform | Requirements |
 |---|---|---|
-| Windows | x86, x64, ARM64 | Windows 10 1903 or later |
-| macOS | x64, ARM64 | macOS 14 or later; accessibility and screen permissions |
-| Linux | x86, x64, ARM32, ARM64, RISC-V64 | AT-SPI2, X11, libpng, json-c and zlib system libraries |
-
-The Windows SDK capture build has no ARM32 target; current macOS releases have no
-32-bit target. Linux x86/x64/ARM binaries target Debian 12 or later; RISC-V64
-requires Debian 13 or later. Other Linux distributions may need a local build.
+| Windows | Windows 10 1903 or later |
+| macOS | macOS 14 or later; Accessibility and Screen Recording permissions |
+| Linux | AT-SPI2, X11, libpng, json-c and zlib system libraries |
 
 To build a capture helper locally, see the platform CMake/Swift sources under
 `capture/`. Linux-specific setup and Wayland behavior are described in the
