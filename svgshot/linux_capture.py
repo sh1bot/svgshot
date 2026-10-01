@@ -63,7 +63,8 @@ def capture(*, window=None, foreground=False, include_hidden=False, bitmap=None,
         import sys
         for key, app, n in choices:
             print(f'{key}: {app.get_name()} — {n.get_name()}', file=sys.stderr)
-        selected_id = input('Window ID: ')
+        print('Window ID: ', end='', file=sys.stderr, flush=True)
+        selected_id = input()
         selected = [n for key, _, n in choices if key == selected_id]
     if len(selected) != 1:
         raise ValueError('Target window is missing or ambiguous; refresh --list-windows')
