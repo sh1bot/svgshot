@@ -193,7 +193,8 @@ struct UiaData
         return "{\"status\":\"value\",\"type\":" + std::to_string(v.vt) + ",\"value\":" + data +
                '}';
     }
-    std::string read_properties(IUIAutomationElement *e, bool password)
+    std::string read_properties(IUIAutomationElement *e, bool password, bool hidden,
+                                bool include_hidden)
     {
         std::string out = "{";
         bool comma = false;
@@ -203,6 +204,21 @@ struct UiaData
                 out += ',';
             comma = true;
             out += '"' + std::to_string(id) + "\":";
+            if (hidden && !include_hidden && id != UIA_ControlTypePropertyId &&
+                id != UIA_IsOffscreenPropertyId && id != UIA_BoundingRectanglePropertyId &&
+                id != UIA_IsPasswordPropertyId)
+            {
+                out += "{\"status\":\"redacted\",\"reason\":\"outside_visible_capture\"}";
+                continue;
+            }
+            if (!include_hidden &&
+                (id == UIA_ValueValuePropertyId || id == UIA_LegacyIAccessibleValuePropertyId ||
+                 id == UIA_AutomationIdPropertyId || id == UIA_ProcessIdPropertyId ||
+                 id == UIA_NativeWindowHandlePropertyId))
+            {
+                out += "{\"status\":\"redacted\",\"reason\":\"potential_hidden_content\"}";
+                continue;
+            }
             // Value/Legacy value may reveal password contents. Other unknown
             // provider-specific fields are not probed on a password element.
             if (password && id != UIA_NamePropertyId && id != UIA_ControlTypePropertyId &&
@@ -216,7 +232,20 @@ struct UiaData
             VARIANT v;
             VariantInit(&v);
             HRESULT hr = e->GetCurrentPropertyValueEx(id, TRUE, &v);
-            out += FAILED(hr) ? failure(hr) : value(v);
+            bool descriptive_string =
+                id == UIA_NamePropertyId || id == UIA_LocalizedControlTypePropertyId ||
+                id == UIA_ClassNamePropertyId || id == UIA_FrameworkIdPropertyId ||
+                id == UIA_HelpTextPropertyId || id == UIA_AccessKeyPropertyId ||
+                id == UIA_AcceleratorKeyPropertyId || id == UIA_ItemTypePropertyId ||
+                id == UIA_ItemStatusPropertyId || id == UIA_FullDescriptionPropertyId ||
+                id == UIA_AriaRolePropertyId || id == UIA_AriaPropertiesPropertyId ||
+                id == UIA_LegacyIAccessibleNamePropertyId ||
+                id == UIA_LegacyIAccessibleDescriptionPropertyId;
+            if (!include_hidden && !descriptive_string &&
+                (v.vt == VT_BSTR || (v.vt & VT_ARRAY && (v.vt & VT_TYPEMASK) == VT_BSTR)))
+                out += "{\"status\":\"redacted\",\"reason\":\"non_descriptive_string\"}";
+            else
+                out += FAILED(hr) ? failure(hr) : value(v);
             VariantClear(&v);
         }
         return out + '}';

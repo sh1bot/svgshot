@@ -560,6 +560,7 @@ def main(argv=None):
     parser.add_argument("--delay", type=int, default=0)
     parser.add_argument("--config", type=Path)
     parser.add_argument("--no-ocr", action="store_true")
+    parser.add_argument("--include-hidden-content", action="store_true", help="Opt in to offscreen UIA content and full values; may include private data")
     parser.add_argument("--allow-raster", action="store_true", help="Opt in to the existing small-raster fallback")
     parser.add_argument("--scene", type=Path)
     parser.add_argument("--html", type=Path, help="Accessible HTML preview with inline SVG and a text outline")
@@ -571,7 +572,7 @@ def main(argv=None):
             raise ValueError("--uia requires --image")
         if not 0 <= args.delay <= 60 or (args.hwnd and args.foreground):
             raise ValueError("Delay must be 0–60; choose --hwnd or --foreground")
-        if args.image and (args.hwnd or args.foreground or args.delay or args.helper):
+        if args.image and (args.hwnd or args.foreground or args.delay or args.helper or args.include_hidden_content):
             raise ValueError("Window selection options do not apply to replay")
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.image:
@@ -582,6 +583,8 @@ def main(argv=None):
             prefix = args.output.with_suffix("")
             image_path, uia_path = Path(str(prefix)+".png"), Path(str(prefix)+".uia.json")
             command = [native_helper(args.helper), "--out", str(prefix.resolve())]
+            if args.include_hidden_content:
+                command += ["--include-hidden-content"]
             if args.hwnd:
                 command += ["--hwnd", args.hwnd]
             if args.foreground:

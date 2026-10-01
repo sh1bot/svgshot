@@ -37,6 +37,8 @@ jobs:
             if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"toggle":1')) { throw 'Missing control semantics' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live --json
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad --include-hidden-content
+            if ($LASTEXITCODE -ne 0) { throw 'Opt-in full capture failed' }
             python tests/native_capture_smoke.py
             if ($LASTEXITCODE -ne 0) { throw 'Embedded snapshot or broad semantics validation failed' }
             & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/embedded
@@ -59,3 +61,4 @@ jobs:
             build/capture/Release/svgshot-capture-win.exe
             build/live.png
             build/live.uia.json
+            build/broad.png

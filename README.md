@@ -257,6 +257,24 @@ warnings. Text has up to 2000 lines, 2048 formatting runs, and 256 selections pe
 element, with a 65536 UTF-16-character limit per text range. UIA references retain
 runtime IDs even when their target lies outside the captured tree.
 
+The privacy review found that full edit values and selections can include text
+scrolled out of view. By default, offscreen/out-of-window nodes retain structural
+records but their content is redacted. Full Value/Legacy value strings, automation
+IDs, process/window-handle properties, and non-descriptive string properties are
+also redacted. Text comes from UIA visible ranges; selections are intersected with
+those ranges before their text is read. `--include-hidden-content` is an explicit
+native/live-capture opt-in to the broader content, and its use is recorded in the
+snapshot. Password redaction remains active in both modes.
+
+Accessible names, help text, and descriptions of visible controls are retained:
+they are necessary to interpret icon buttons and other controls. They can contain
+information **not painted in the bitmap**, including full names behind clipped
+labels. This is accessibility metadata, not a guarantee that every embedded string
+is visible or free of PII. Review the extracted JSON before sharing sensitive
+captures. The collector does not inspect files, process command lines, clipboard,
+other windows, or application storage, and it does not invoke controls. Metadata
+remains embedded in SVG/HTML output as well as PNG input.
+
 The `suIA` payload has a 16-byte big-endian header: 8-byte `SVGSHOT\0` magic,
 container version 1, encoding 1 (JSON), compression 1 (zlib/DEFLATE), reserved zero,
 and a 4-byte uncompressed length. A separate zlib stream follows. PNG framing

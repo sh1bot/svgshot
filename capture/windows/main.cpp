@@ -233,7 +233,7 @@ std::string format_runs(IUIAutomationTextRange *range, UiaData &data, int &budge
     return out + '}';
 }
 
-std::string text_selection(IUIAutomationElement *e, UiaData &data)
+std::string text_selection(IUIAutomationElement *e, UiaData &data, bool include_hidden)
 {
     auto p = pattern<IUIAutomationTextPattern>(e, UIA_TextPatternId);
     if (!p)
@@ -251,17 +251,66 @@ std::string text_selection(IUIAutomationElement *e, UiaData &data)
     if (FAILED(selection_hr))
         out += ",\"supported_selection_error\":" + UiaData::failure(selection_hr);
     out += ",\"ranges\":[";
-    for (int i = 0; i < count && i < 256; ++i)
+    com_ptr<IUIAutomationTextRangeArray> visible;
+    if (!include_hidden)
     {
-        com_ptr<IUIAutomationTextRange> range;
-        hr = ranges->GetElement(i, range.put());
-        if (i)
-            out += ',';
-        out += SUCCEEDED(hr) && range ? range_details(range.get(), data) : UiaData::failure(hr);
+        hr = p->GetVisibleRanges(visible.put());
+        if (FAILED(hr))
+            return UiaData::failure(hr);
     }
-    if (count > 256)
+    int visible_count = 0, emitted = 0;
+    if (visible)
+        visible->get_Length(&visible_count);
+    bool comma = false;
+    for (int i = 0; i < count && emitted < 256; ++i)
+    {
+        com_ptr<IUIAutomationTextRange> selected;
+        hr = ranges->GetElement(i, selected.put());
+        if (FAILED(hr) || !selected)
+            continue;
+        for (int j = 0; j < (include_hidden ? 1 : std::min(visible_count, 2000)) && emitted < 256;
+             ++j)
+        {
+            com_ptr<IUIAutomationTextRange> range;
+            selected->Clone(range.put());
+            if (!range)
+                continue;
+            if (!include_hidden)
+            {
+                com_ptr<IUIAutomationTextRange> viewport;
+                visible->GetElement(j, viewport.put());
+                if (!viewport)
+                    continue;
+                int cmp = 0;
+                if (FAILED(range->CompareEndpoints(TextPatternRangeEndpoint_Start, viewport.get(),
+                                                   TextPatternRangeEndpoint_Start, &cmp)))
+                    continue;
+                if (cmp < 0)
+                    range->MoveEndpointByRange(TextPatternRangeEndpoint_Start, viewport.get(),
+                                               TextPatternRangeEndpoint_Start);
+                if (FAILED(range->CompareEndpoints(TextPatternRangeEndpoint_End, viewport.get(),
+                                                   TextPatternRangeEndpoint_End, &cmp)))
+                    continue;
+                if (cmp > 0)
+                    range->MoveEndpointByRange(TextPatternRangeEndpoint_End, viewport.get(),
+                                               TextPatternRangeEndpoint_End);
+                range->CompareEndpoints(TextPatternRangeEndpoint_Start, range.get(),
+                                        TextPatternRangeEndpoint_End, &cmp);
+                if (cmp >= 0)
+                    continue;
+            }
+            if (comma)
+                out += ',';
+            comma = true;
+            out += range_details(range.get(), data);
+            ++emitted;
+        }
+    }
+    bool truncated = emitted >= 256 || (!include_hidden && visible_count > 2000);
+    if (truncated)
         data.text_truncated = true;
-    return out + "],\"truncated\":" + (count > 256 ? "true}" : "false}");
+    return out + "],\"visible_only\":" + (include_hidden ? "false" : "true") +
+           ",\"truncated\":" + (truncated ? "true}" : "false}");
 }
 
 std::string text_ranges(IUIAutomationElement *e, UiaData &data, std::string &status)
@@ -385,7 +434,9 @@ struct Reader
     int count = 0;
     bool truncated = false;
     std::unique_ptr<UiaData> data;
-    Reader()
+    RECT viewport{};
+    bool include_hidden = false;
+    Reader(RECT area, bool allow_hidden) : viewport(area), include_hidden(allow_hidden)
     {
         check_hresult(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
                                        IID_PPV_ARGS(automation.put())));
@@ -400,7 +451,13 @@ struct Reader
             return "null";
         }
         RECT r{};
-        e->get_CurrentBoundingRectangle(&r);
+        HRESULT bounds_hr = e->get_CurrentBoundingRectangle(&r);
+        BOOL offscreen = FALSE;
+        HRESULT offscreen_hr = e->get_CurrentIsOffscreen(&offscreen);
+        RECT intersection{};
+        bool hidden = FAILED(bounds_hr) || FAILED(offscreen_hr) || offscreen ||
+                      !IntersectRect(&intersection, &r, &viewport);
+        bool redact_content = hidden && !include_hidden;
         CONTROLTYPEID type = 0;
         e->get_CurrentControlType(&type);
         BOOL password = FALSE;
@@ -412,7 +469,8 @@ struct Reader
             << ",\"bounds\":" << rect_json(r);
         auto str = [&](const char *key, auto getter) {
             BSTR value = nullptr;
-            (e->*getter)(&value);
+            if (!redact_content && (include_hidden || std::string(key) != "automation_id"))
+                (e->*getter)(&value);
             out << ",\"" << key << "\":" << json(bstr(value));
         };
         str("name", &IUIAutomationElement::get_CurrentName);
@@ -434,7 +492,8 @@ struct Reader
         flag("focusable", &IUIAutomationElement::get_CurrentIsKeyboardFocusable);
         flag("control_element", &IUIAutomationElement::get_CurrentIsControlElement);
         flag("content_element", &IUIAutomationElement::get_CurrentIsContentElement);
-        out << ",\"password\":" << (password ? "true" : "false");
+        out << ",\"password\":" << (password ? "true" : "false")
+            << ",\"content_redacted\":" << (redact_content ? "true" : "false");
         com_ptr<IUIAutomationElement> label;
         e->get_CurrentLabeledBy(label.put());
         if (label)
@@ -474,15 +533,18 @@ struct Reader
                 out << static_cast<int>(value);
             }
         }
-        if (!password)
+        if (!password && !redact_content)
         {
             if (auto p = pattern<IUIAutomationValuePattern>(e, UIA_ValuePatternId))
             {
-                BSTR value = nullptr;
-                if (SUCCEEDED(p->get_CurrentValue(&value)))
+                if (include_hidden)
                 {
-                    state_key("value");
-                    out << json(bstr(value));
+                    BSTR value = nullptr;
+                    if (SUCCEEDED(p->get_CurrentValue(&value)))
+                    {
+                        state_key("value");
+                        out << json(bstr(value));
+                    }
                 }
                 BOOL ro = FALSE;
                 if (SUCCEEDED(p->get_CurrentIsReadOnly(&ro)))
@@ -502,11 +564,12 @@ struct Reader
             }
         }
         std::string text_status = "{\"status\":\"redacted\"}";
-        auto lines = password ? "[]" : text_ranges(e, *data, text_status);
-        out << "},\"properties\":" << data->read_properties(e, password)
+        auto lines = password || redact_content ? "[]" : text_ranges(e, *data, text_status);
+        out << "},\"properties\":" << data->read_properties(e, password, hidden, include_hidden)
             << ",\"patterns\":" << data->read_patterns(e) << ",\"text_ranges\":" << lines
             << ",\"text_capture\":" << text_status << ",\"text_selection\":"
-            << (password ? "{\"status\":\"redacted\"}" : text_selection(e, *data))
+            << (password || redact_content ? "{\"status\":\"redacted\"}"
+                                           : text_selection(e, *data, include_hidden))
             << ",\"children\":[";
         com_ptr<IUIAutomationElement> child;
         HRESULT children_hr = S_OK;
@@ -544,15 +607,15 @@ struct Snapshot
         CloseHandle(done);
     }
 };
-std::shared_ptr<Snapshot> read_uia(HWND hwnd)
+std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden)
 {
     auto result = std::make_shared<Snapshot>();
-    std::thread worker([hwnd, result] {
+    std::thread worker([hwnd, result, include_hidden] {
         try
         {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             {
-                Reader reader;
+                Reader reader(bounds(hwnd), include_hidden);
                 com_ptr<IUIAutomationElement> root;
                 check_hresult(reader.automation->ElementFromHandle(hwnd, root.put()));
                 result->root = reader.node(root.get());
@@ -862,7 +925,7 @@ int fixture()
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"svgshot Capture Fixture",
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 270, nullptr, nullptr,
+                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 330, nullptr, nullptr,
                               wc.hInstance, nullptr);
     CreateWindowW(L"BUTTON", L"Add…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20, 30, 100, 30, hwnd,
                   nullptr, wc.hInstance, nullptr);
@@ -876,6 +939,15 @@ int fixture()
     CreateWindowW(L"EDIT", L"PasswordHiddenSentinel",
                   WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD, 20, 165, 300, 30, hwnd, nullptr,
                   wc.hInstance, nullptr);
+    LoadLibraryW(L"Msftedit.dll");
+    CreateWindowW(L"RICHEDIT50W", L"Formatted visible text",
+                  WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE, 20, 205, 300, 40, hwnd, nullptr,
+                  wc.hInstance, nullptr);
+    // Neither of these sentinel values is visible in the bitmap.
+    CreateWindowW(L"EDIT", L"HiddenValueSentinel", WS_CHILD, 20, 10, 100, 20, hwnd, nullptr,
+                  wc.hInstance, nullptr);
+    CreateWindowW(L"EDIT", L"OutsideValueSentinel", WS_CHILD | WS_VISIBLE, 1000, 1000, 100, 20,
+                  hwnd, nullptr, wc.hInstance, nullptr);
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
@@ -892,7 +964,7 @@ int wmain(int argc, wchar_t **argv)
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         HWND hwnd = nullptr;
         std::wstring prefix;
-        bool uiaOnly = false, foreground = false, jsonExport = false;
+        bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -907,6 +979,8 @@ int wmain(int argc, wchar_t **argv)
                 foreground = true;
             else if (arg == L"--delay" && i + 1 < argc)
                 delay = std::stoi(argv[++i]);
+            else if (arg == L"--include-hidden-content")
+                includeHidden = true;
             else if (arg == L"--json")
                 jsonExport = true;
             else if (arg == L"--uia-only")
@@ -914,7 +988,8 @@ int wmain(int argc, wchar_t **argv)
             else if (arg == L"--help")
             {
                 std::cout << "svgshot-capture --out PREFIX [--hwnd NUMBER | --foreground --delay "
-                             "SECONDS] [--json] [--uia-only]\nSelect a window by clicking it; Esc "
+                             "SECONDS] [--json] [--uia-only] [--include-hidden-content]\nSelect a "
+                             "window by clicking it; Esc "
                              "cancels. "
                              "Requires Windows 10 1903+.\n";
                 return 0;
@@ -942,7 +1017,7 @@ int wmain(int argc, wchar_t **argv)
         if (!IsWindow(hwnd) || IsIconic(hwnd))
             throw std::runtime_error("Target is missing or minimized");
         RECT before = bounds(hwnd);
-        auto snapshot = read_uia(hwnd);
+        auto snapshot = read_uia(hwnd, includeHidden);
         SIZE size{before.right - before.left, before.bottom - before.top};
         if (!uiaOnly)
             size = capture_png(hwnd, prefix + L".png");
@@ -988,8 +1063,9 @@ int wmain(int argc, wchar_t **argv)
                "\"max_format_runs_per_element\":2048,\"max_selections_per_element\":256,\"max_"
                "string_characters\":65536,"
                "\"timeout_seconds\":20,\"custom_properties\":\"not_discovered\","
-               "\"password_content\":\"redacted\",\"actions_invoked\":false},\"root\":"
-            << snapshot->root << "}\n";
+               "\"password_content\":\"redacted\",\"actions_invoked\":false,\"include_hidden_"
+               "content\":"
+            << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
         if (!uiaOnly)
             embed_snapshot(std::filesystem::path(prefix + L".png"), out.str());
         if (jsonExport || uiaOnly)
