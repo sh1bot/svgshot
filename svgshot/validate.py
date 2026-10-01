@@ -1,4 +1,18 @@
-"""Perceptual and semantic checks, intentionally not a single pixel-difference score."""
+"""Developer reference for ``--report`` metrics.
+
+``geometry`` measures edge recall/precision within four pixels after masking
+text boxes, plus blurred RGB error. ``text`` checks rendered OCR against the
+reconstructed scene; ``source_text`` uses a separate OCR pass over the input.
+Neither OCR pass is ground truth. ``scorecard`` checks selected layout, text and
+image regions; ``ground_truth`` compares detected elements to an optional
+hand-authored fixture manifest. Fidelity fields report the area covered by
+source-image fallback regions.
+
+The combined score is a heuristic for ranking iterations, not a calibrated
+measure of correctness. Region checks cover only patterns they recognize, and
+OCR can miss or misread text. Treat individual findings and known-fixture
+results as more useful evidence than a passing global score.
+"""
 from __future__ import annotations
 
 import difflib

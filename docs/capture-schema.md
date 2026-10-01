@@ -138,30 +138,5 @@ fields need not be implemented by every provider. A required-field or meaning
 change increments the schema version. Renderers consume common semantics and may
 use optional hints; reading native provider details is a deliberate extension.
 
-## Capture and conversion flows
-
-Store captures independently of rendering:
-
-```sh
-python -m svgshot.grab corpus/window.png
-python -m svgshot.convert corpus/window.png window.svg --html window.html
-python -m svgshot.snapshot corpus/window.png --json window.capture.json
-```
-
-Capture and convert directly, without an intermediate PNG file:
-
-```sh
-python -m svgshot.convert --capture window.svg --html window.html
-```
-
-Installed commands are `svgshot-grab` and `svgshot-convert`. Direct conversion
-calls the same capture backend, using an in-memory PNG stream, so semantics and
-privacy defaults match the stored-capture flow. It does not add a corpus entry.
-Native helpers on all three platforms support PNG stdout and standalone file output.
-The old `python -m svgshot.capture output.svg ...` command remains compatible and
-keeps its original capture-and-save behaviour.
-
-Build and distribution instructions are in the repository README and
-[linux-capture.md](linux-capture.md). Rolling `capture-latest` release assets are
-built from main as single native executables and update without requiring a
-version tag. Each executable reports its embedded source commit with `--version`.
+For capture commands and platform setup, see the [README](../README.md) and
+[Linux capture notes](linux-capture.md).
