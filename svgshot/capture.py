@@ -172,8 +172,17 @@ def ink_box(image, box):
     return None
 
 
+def uia_foreground(attributes):
+    """Decode UIA's foreground COLORREF (0x00BBGGRR), when supported."""
+    attribute = attributes.get("40008", {})
+    value = attribute.get("value")
+    if attribute.get("status") == "value" and type(value) is int and 0 <= value <= 0xffffff:
+        return (value & 255, (value >> 8) & 255, (value >> 16) & 255)
+    return None
+
+
 def terminal_text(image, item, snapshot):
-    """Keep UIA's fixed character cells; sample bitmap colours, never OCR words."""
+    """Keep UIA's fixed cells and colours; sample pixels only for missing colours."""
     import numpy as np
     nodes = []
     for line in item.get("text_ranges", []):
@@ -188,16 +197,31 @@ def terminal_text(image, item, snapshot):
         cell = width / len(text)
         pixels = np.asarray(image.crop((x, y, x+width, y+height)).convert("RGB"))
         background = np.median(pixels.reshape(-1, 3), axis=0)
+        foregrounds = [uia_foreground(line.get("attributes", {}))] * len(text)
+        offset = 0
+        for run in line.get("format_runs", {}).get("ranges", []):
+            content = run.get("text", "").rstrip("\r\n")
+            if not content:
+                continue
+            start = text.find(content, offset)
+            if start < 0:
+                continue
+            offset = start + len(content)
+            foreground = uia_foreground(run.get("attributes", {}))
+            if foreground is not None:
+                foregrounds[start:offset] = [foreground] * len(content)
         runs = []
         for index, char in enumerate(text.rstrip()):
-            color = runs[-1][2] if runs else (204, 204, 204)
-            if not char.isspace():
+            semantic_color = foregrounds[index]
+            color = semantic_color or (runs[-1][2] if runs else (204, 204, 204))
+            if semantic_color is None and not char.isspace():
                 patch = pixels[:, round(index*cell):round((index+1)*cell)]
                 distance = np.max(np.abs(patch.astype(float)-background), axis=2)
                 ink = patch[(distance > 60) & (distance >= np.percentile(distance, 80))]
                 if len(ink):
                     color = tuple(int(v) for v in np.median(ink, axis=0))
-            if runs and max(abs(a-b) for a, b in zip(color, runs[-1][2])) < 35:
+            if runs and (color == runs[-1][2] or semantic_color is None
+                         and max(abs(a-b) for a, b in zip(color, runs[-1][2])) < 35):
                 runs[-1][1] += char
             else:
                 runs.append([index, char, color])

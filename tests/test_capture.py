@@ -175,6 +175,36 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(all('Mono' in n.get('font-family') or 'Consolas' in n.get('font-family') for n in visible))
         self.assertIn('AB  CD' + ' '*14, svg)
 
+    def test_terminal_semantic_colours_override_letter_pixel_colours(self):
+        from svgshot.capture import terminal_text
+        from PIL import ImageDraw
+        s = snapshot()
+        terminal = element(50020, 'Terminal', [110, 240, 120, 30], class_name='TermControl')
+        value = lambda color: {'40008': {'status': 'value', 'value': color}}
+        line = {'text': 'enn W xyz ', 'rectangles': [[110, 240, 120, 30]],
+                'attributes': value(0xcccccc),
+                'format_runs': {'status': 'value', 'ranges': [
+                    {'text': 'enn W ', 'attributes': value(0xcccccc)},
+                    {'text': 'xyz ', 'attributes': value(0x6a5fff)},
+                ]}}
+        terminal['text_ranges'] = [line]
+        image = Image.new('RGB', (300, 180), '#012456')
+        draw = ImageDraw.Draw(image)
+        for index, color in enumerate(['#cccccc', '#b096bc', '#b096bc', '#cccccc', '#c8c3b3']):
+            draw.rectangle((13+index*12, 45, 18+index*12, 60), fill=color)
+        texts = terminal_text(image, terminal, s)
+        self.assertEqual([(n.text, n.color, n.box[0], n.box[2]) for n in texts],
+                         [('enn W ', '#cccccc', 10, 72), ('xyz', '#ff5f6a', 82, 36)])
+        # Mixed line colours must use the individual formatting ranges.
+        line['attributes'] = {'40008': {'status': 'mixed'}}
+        self.assertEqual([n.color for n in terminal_text(image, terminal, s)],
+                         ['#cccccc', '#ff5f6a'])
+        # A line colour also works without any formatting ranges.
+        line.pop('format_runs')
+        line['attributes'] = value(0xcccccc)
+        self.assertEqual([(n.text, n.color) for n in terminal_text(image, terminal, s)],
+                         [('enn W xyz', '#cccccc')])
+
     def test_clipped_xaml_caption_keeps_full_semantic_name(self):
         from PIL import ImageDraw
         s = snapshot()
