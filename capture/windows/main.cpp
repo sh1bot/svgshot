@@ -1,4 +1,4 @@
-// Windows SDK only: UI Automation + Windows Graphics Capture + WIC PNG.
+// UI Automation + Windows Graphics Capture + WIC PNG, with vendored miniz.
 #include <windows.h>
 #include <ole2.h>
 #include <UIAutomation.h>
@@ -102,20 +102,190 @@ template <typename T> com_ptr<T> pattern(IUIAutomationElement *e, PATTERNID id)
     e->GetCurrentPatternAs(id, __uuidof(T), p.put_void());
     return p;
 }
-std::string text_ranges(IUIAutomationElement *e)
+#include "uia_data.h"
+#include "png_snapshot.h"
+
+std::string range_details(IUIAutomationTextRange *range, UiaData &data)
+{
+    std::ostringstream out;
+    BSTR raw = nullptr;
+    HRESULT hr = range->GetText(65537, &raw);
+    auto text = bstr(raw);
+    bool truncated = text.size() > 65536;
+    if (truncated)
+    {
+        text.resize(65536);
+        data.text_truncated = true;
+    }
+    out << "{\"text\":" << json(text)
+        << ",\"text_status\":" << (FAILED(hr) ? UiaData::failure(hr) : "{\"status\":\"value\"}")
+        << ",\"truncated\":" << (truncated ? "true" : "false") << ",\"rectangles\":[";
+    SAFEARRAY *rectangles = nullptr;
+    hr = range->GetBoundingRectangles(&rectangles);
+    if (SUCCEEDED(hr) && rectangles)
+    {
+        LONG lo = 0, hi = -1;
+        SafeArrayGetLBound(rectangles, 1, &lo);
+        SafeArrayGetUBound(rectangles, 1, &hi);
+        for (LONG i = lo; i + 3 <= hi; i += 4)
+        {
+            if (i != lo)
+                out << ',';
+            out << '[';
+            for (LONG j = i; j < i + 4; ++j)
+            {
+                double value = 0;
+                SafeArrayGetElement(rectangles, &j, &value);
+                if (j != i)
+                    out << ',';
+                out << (std::isfinite(value) ? value : 0);
+            }
+            out << ']';
+        }
+    }
+    if (rectangles)
+        SafeArrayDestroy(rectangles);
+    out << "],\"bounds_status\":" << (FAILED(hr) ? UiaData::failure(hr) : "{\"status\":\"value\"}")
+        << ",\"attributes\":" << data.attributes(range);
+    com_ptr<IUIAutomationElement> enclosing;
+    hr = range->GetEnclosingElement(enclosing.put());
+    out << ",\"enclosing_element\":\"" << (enclosing ? runtime_id(enclosing.get()) : "") << "\"";
+    if (FAILED(hr))
+        out << ",\"enclosing_error\":" << UiaData::failure(hr);
+    com_ptr<IUIAutomationElementArray> children;
+    hr = range->GetChildren(children.put());
+    out << ",\"children\":[";
+    int count = 0;
+    if (children)
+        children->get_Length(&count);
+    for (int i = 0; i < count && i < 5000; ++i)
+    {
+        com_ptr<IUIAutomationElement> child;
+        children->GetElement(i, child.put());
+        if (i)
+            out << ',';
+        out << '\"' << (child ? runtime_id(child.get()) : "") << '\"';
+    }
+    out << ']';
+    if (count > 5000)
+    {
+        out << ",\"children_truncated\":true";
+        data.text_truncated = true;
+    }
+    if (FAILED(hr))
+        out << ",\"children_error\":" << UiaData::failure(hr);
+    return out.str() + '}';
+}
+
+std::string format_runs(IUIAutomationTextRange *range, UiaData &data, int &budget)
+{
+    com_ptr<IUIAutomationTextRange> run;
+    HRESULT hr = range->Clone(run.put());
+    if (FAILED(hr))
+        return UiaData::failure(hr);
+    run->MoveEndpointByRange(TextPatternRangeEndpoint_End, run.get(),
+                             TextPatternRangeEndpoint_Start);
+    std::string out = "{\"status\":\"value\",\"ranges\":[";
+    bool comma = false, truncated = false;
+    while (true)
+    {
+        int cmp = 0;
+        hr = run->CompareEndpoints(TextPatternRangeEndpoint_Start, range,
+                                   TextPatternRangeEndpoint_End, &cmp);
+        if (FAILED(hr) || cmp >= 0)
+            break;
+        if (budget-- <= 0)
+        {
+            truncated = true;
+            break;
+        }
+        int moved = 0;
+        hr = run->MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Format, 1, &moved);
+        if (FAILED(hr) || !moved)
+            break;
+        run->CompareEndpoints(TextPatternRangeEndpoint_End, range, TextPatternRangeEndpoint_End,
+                              &cmp);
+        if (cmp > 0)
+            run->MoveEndpointByRange(TextPatternRangeEndpoint_End, range,
+                                     TextPatternRangeEndpoint_End);
+        run->CompareEndpoints(TextPatternRangeEndpoint_Start, run.get(),
+                              TextPatternRangeEndpoint_End, &cmp);
+        if (cmp >= 0)
+        {
+            truncated = true;
+            break;
+        }
+        if (comma)
+            out += ',';
+        comma = true;
+        out += range_details(run.get(), data);
+        run->MoveEndpointByRange(TextPatternRangeEndpoint_Start, run.get(),
+                                 TextPatternRangeEndpoint_End);
+    }
+    out += ']';
+    if (FAILED(hr))
+        out += ",\"error\":" + UiaData::failure(hr);
+    if (truncated)
+    {
+        data.text_truncated = true;
+        out += ",\"truncated\":true";
+    }
+    return out + '}';
+}
+
+std::string text_selection(IUIAutomationElement *e, UiaData &data)
 {
     auto p = pattern<IUIAutomationTextPattern>(e, UIA_TextPatternId);
     if (!p)
-        return "[]";
+        return "{\"status\":\"not_supported\"}";
     com_ptr<IUIAutomationTextRangeArray> ranges;
-    if (FAILED(p->GetVisibleRanges(ranges.put())) || !ranges)
+    HRESULT hr = p->GetSelection(ranges.put());
+    if (FAILED(hr))
+        return UiaData::failure(hr);
+    int count = 0;
+    if (ranges)
+        ranges->get_Length(&count);
+    SupportedTextSelection supported = SupportedTextSelection_None;
+    HRESULT selection_hr = p->get_SupportedTextSelection(&supported);
+    std::string out = "{\"status\":\"value\",\"supported_selection\":" + std::to_string(supported);
+    if (FAILED(selection_hr))
+        out += ",\"supported_selection_error\":" + UiaData::failure(selection_hr);
+    out += ",\"ranges\":[";
+    for (int i = 0; i < count && i < 256; ++i)
+    {
+        com_ptr<IUIAutomationTextRange> range;
+        hr = ranges->GetElement(i, range.put());
+        if (i)
+            out += ',';
+        out += SUCCEEDED(hr) && range ? range_details(range.get(), data) : UiaData::failure(hr);
+    }
+    if (count > 256)
+        data.text_truncated = true;
+    return out + "],\"truncated\":" + (count > 256 ? "true}" : "false}");
+}
+
+std::string text_ranges(IUIAutomationElement *e, UiaData &data, std::string &status)
+{
+    auto p = pattern<IUIAutomationTextPattern>(e, UIA_TextPatternId);
+    if (!p)
+    {
+        status = "{\"status\":\"not_supported\"}";
         return "[]";
+    }
+    com_ptr<IUIAutomationTextRangeArray> ranges;
+    HRESULT visible_hr = p->GetVisibleRanges(ranges.put());
+    if (FAILED(visible_hr) || !ranges)
+    {
+        status = UiaData::failure(FAILED(visible_hr) ? visible_hr : E_FAIL);
+        return "[]";
+    }
+    status = "{\"status\":\"value\"}";
     int n = 0;
     ranges->get_Length(&n);
     std::ostringstream out;
     out << '[';
     bool comma = false;
-    int budget = 2000;
+    int budget = 2000, format_budget = 2048;
     for (int i = 0; i < n && budget > 0; ++i)
     {
         com_ptr<IUIAutomationTextRange> visible, line;
@@ -147,12 +317,22 @@ std::string text_ranges(IUIAutomationElement *e)
                 clipped->MoveEndpointByRange(TextPatternRangeEndpoint_End, visible.get(),
                                              TextPatternRangeEndpoint_End);
             BSTR raw = nullptr;
-            clipped->GetText(-1, &raw);
+            HRESULT text_hr = clipped->GetText(65537, &raw);
+            if (FAILED(text_hr))
+                status = UiaData::failure(text_hr);
             auto text = bstr(raw);
+            if (text.size() > 65536)
+            {
+                text.resize(65536);
+                data.text_truncated = true;
+            }
             while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n'))
                 text.pop_back();
             SAFEARRAY *a = nullptr;
-            if (!text.empty() && SUCCEEDED(clipped->GetBoundingRectangles(&a)) && a)
+            HRESULT bounds_hr = clipped->GetBoundingRectangles(&a);
+            if (FAILED(bounds_hr))
+                status = UiaData::failure(bounds_hr);
+            if (!text.empty() && SUCCEEDED(bounds_hr) && a)
             {
                 LONG low = 0, high = -1;
                 SafeArrayGetLBound(a, 1, &low);
@@ -178,7 +358,9 @@ std::string text_ranges(IUIAutomationElement *e)
                         }
                         out << ']';
                     }
-                    out << "]}";
+                    out << "],\"attributes\":" << data.attributes(clipped.get())
+                        << ",\"format_runs\":" << format_runs(clipped.get(), data, format_budget)
+                        << '}';
                 }
             }
             if (a)
@@ -187,6 +369,11 @@ std::string text_ranges(IUIAutomationElement *e)
             if (FAILED(line->Move(TextUnit_Line, 1, &moved)) || moved == 0)
                 break;
         }
+    }
+    if (budget <= 0)
+    {
+        data.text_truncated = true;
+        status = "{\"status\":\"value\",\"truncated\":true}";
     }
     out << ']';
     return out.str();
@@ -197,11 +384,13 @@ struct Reader
     com_ptr<IUIAutomationTreeWalker> walker;
     int count = 0;
     bool truncated = false;
+    std::unique_ptr<UiaData> data;
     Reader()
     {
         check_hresult(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
                                        IID_PPV_ARGS(automation.put())));
         check_hresult(automation->get_RawViewWalker(walker.put()));
+        data = std::make_unique<UiaData>(automation.get());
     }
     std::string node(IUIAutomationElement *e, int depth = 0)
     {
@@ -215,7 +404,9 @@ struct Reader
         CONTROLTYPEID type = 0;
         e->get_CurrentControlType(&type);
         BOOL password = FALSE;
-        e->get_CurrentIsPassword(&password);
+        // Fail closed when the provider cannot establish password status.
+        if (FAILED(e->get_CurrentIsPassword(&password)))
+            password = TRUE;
         std::ostringstream out;
         out << "{\"id\":\"" << runtime_id(e) << "\",\"control_type\":" << type
             << ",\"bounds\":" << rect_json(r);
@@ -310,10 +501,17 @@ struct Reader
                 }
             }
         }
-        out << "},\"text_ranges\":" << (password ? "[]" : text_ranges(e)) << ",\"children\":[";
+        std::string text_status = "{\"status\":\"redacted\"}";
+        auto lines = password ? "[]" : text_ranges(e, *data, text_status);
+        out << "},\"properties\":" << data->read_properties(e, password)
+            << ",\"patterns\":" << data->read_patterns(e) << ",\"text_ranges\":" << lines
+            << ",\"text_capture\":" << text_status << ",\"text_selection\":"
+            << (password ? "{\"status\":\"redacted\"}" : text_selection(e, *data))
+            << ",\"children\":[";
         com_ptr<IUIAutomationElement> child;
+        HRESULT children_hr = S_OK;
         if (!password)
-            walker->GetFirstChildElement(e, child.put());
+            children_hr = walker->GetFirstChildElement(e, child.put());
         bool comma = false;
         while (child && count < 5000)
         {
@@ -322,19 +520,24 @@ struct Reader
             comma = true;
             out << node(child.get(), depth + 1);
             com_ptr<IUIAutomationElement> next;
-            walker->GetNextSiblingElement(child.get(), next.put());
+            children_hr = walker->GetNextSiblingElement(child.get(), next.put());
             child = std::move(next);
         }
         if (child)
             truncated = true;
-        out << "]}";
+        out << "],\"children_status\":"
+            << (password              ? "{\"status\":\"redacted\"}"
+                : FAILED(children_hr) ? UiaData::failure(children_hr)
+                                      : "{\"status\":\"value\"}")
+            << '}';
         return out.str();
     }
 };
 struct Snapshot
 {
     HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    std::string root, error;
+    std::string root, error, property_names, pattern_names;
+    bool text_truncated = false;
     bool truncated = false;
     ~Snapshot()
     {
@@ -353,6 +556,9 @@ std::shared_ptr<Snapshot> read_uia(HWND hwnd)
                 com_ptr<IUIAutomationElement> root;
                 check_hresult(reader.automation->ElementFromHandle(hwnd, root.put()));
                 result->root = reader.node(root.get());
+                result->property_names = reader.data->property_names;
+                result->pattern_names = reader.data->pattern_names;
+                result->text_truncated = reader.data->text_truncated;
                 result->truncated = reader.truncated;
             }
             winrt::uninit_apartment();
@@ -656,7 +862,7 @@ int fixture()
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"svgshot Capture Fixture",
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 220, nullptr, nullptr,
+                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 270, nullptr, nullptr,
                               wc.hInstance, nullptr);
     CreateWindowW(L"BUTTON", L"Add…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20, 30, 100, 30, hwnd,
                   nullptr, wc.hInstance, nullptr);
@@ -667,6 +873,9 @@ int fixture()
     CreateWindowW(L"EDIT", L"Exact text: <SVG> & UIA",
                   WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 20, 120, 300, 30, hwnd,
                   nullptr, wc.hInstance, nullptr);
+    CreateWindowW(L"EDIT", L"PasswordHiddenSentinel",
+                  WS_CHILD | WS_VISIBLE | WS_BORDER | ES_PASSWORD, 20, 165, 300, 30, hwnd, nullptr,
+                  wc.hInstance, nullptr);
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
@@ -683,7 +892,7 @@ int wmain(int argc, wchar_t **argv)
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         HWND hwnd = nullptr;
         std::wstring prefix;
-        bool uiaOnly = false, foreground = false;
+        bool uiaOnly = false, foreground = false, jsonExport = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -698,12 +907,15 @@ int wmain(int argc, wchar_t **argv)
                 foreground = true;
             else if (arg == L"--delay" && i + 1 < argc)
                 delay = std::stoi(argv[++i]);
+            else if (arg == L"--json")
+                jsonExport = true;
             else if (arg == L"--uia-only")
                 uiaOnly = true;
             else if (arg == L"--help")
             {
                 std::cout << "svgshot-capture --out PREFIX [--hwnd NUMBER | --foreground --delay "
-                             "SECONDS] [--uia-only]\nSelect a window by clicking it; Esc cancels. "
+                             "SECONDS] [--json] [--uia-only]\nSelect a window by clicking it; Esc "
+                             "cancels. "
                              "Requires Windows 10 1903+.\n";
                 return 0;
             }
@@ -745,15 +957,20 @@ int wmain(int argc, wchar_t **argv)
             before = conventional;
         bool mapped =
             size.cx != before.right - before.left || size.cy != before.bottom - before.top;
-        std::ofstream out(std::filesystem::path(prefix + L".uia.json"), std::ios::binary);
-        if (!out)
-            throw std::runtime_error("Cannot write UIA snapshot");
-        out << "{\"version\":1,\"screen_bounds\":" << rect_json(before) << ",\"image_size\":["
+        std::ostringstream out;
+        out << "{\"version\":2,\"screen_bounds\":" << rect_json(before) << ",\"image_size\":["
             << size.cx << ',' << size.cy << "],\"warnings\":[";
         bool warning = false;
         if (snapshot->truncated)
         {
             out << "\"UIA tree truncated at 5000 elements or 64 levels\"";
+            warning = true;
+        }
+        if (snapshot->text_truncated)
+        {
+            if (warning)
+                out << ',';
+            out << "\"Text capture truncated by line, format-run, selection, or string limit\"";
             warning = true;
         }
         if (mapped)
@@ -763,9 +980,26 @@ int wmain(int argc, wchar_t **argv)
             out << "\"Capture size differs from window bounds; coordinates require scaling. "
                    "Inspect the result.\"";
         }
-        out << "],\"root\":" << snapshot->root << "}\n";
-        if (!out)
-            throw std::runtime_error("Failed to write UIA snapshot");
+        out << "],\"property_names\":" << snapshot->property_names
+            << ",\"pattern_names\":" << snapshot->pattern_names
+            << ",\"capture_policy\":{\"view\":\"raw\",\"property_ids\":[30000,30199],"
+               "\"pattern_ids\":[10000,10034],\"text_attribute_ids\":[40000,40043],"
+               "\"max_elements\":5000,\"max_depth\":64,\"max_lines_per_element\":2000,"
+               "\"max_format_runs_per_element\":2048,\"max_selections_per_element\":256,\"max_"
+               "string_characters\":65536,"
+               "\"timeout_seconds\":20,\"custom_properties\":\"not_discovered\","
+               "\"password_content\":\"redacted\",\"actions_invoked\":false},\"root\":"
+            << snapshot->root << "}\n";
+        if (!uiaOnly)
+            embed_snapshot(std::filesystem::path(prefix + L".png"), out.str());
+        if (jsonExport || uiaOnly)
+        {
+            std::ofstream file(std::filesystem::path(prefix + L".uia.json"), std::ios::binary);
+            file << out.str();
+            file.close();
+            if (!file)
+                throw std::runtime_error("Cannot write UIA JSON export");
+        }
         return 0;
     }
     catch (const winrt::hresult_error &e)

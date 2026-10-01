@@ -21,6 +21,7 @@ from PIL import Image
 from .model import Node, flatten
 from .recognize import Options, reconstruct
 from .svg import to_svg, _font
+from .snapshot import read_snapshot
 
 TYPES = dict(enumerate((
     "button", "calendar", "checkbox", "combobox", "edit", "hyperlink", "image",
@@ -47,7 +48,7 @@ def kind(item):
 
 
 def validate_snapshot(snapshot, image):
-    if snapshot.get("version") != 1 or not isinstance(snapshot.get("root"), dict):
+    if snapshot.get("version") not in (1, 2) or not isinstance(snapshot.get("root"), dict):
         raise ValueError("Unsupported or incomplete UIA snapshot")
     bounds = snapshot.get("screen_bounds", [])
     if len(bounds) != 4 or not all(isinstance(n, (int, float)) and math.isfinite(n) for n in bounds) or min(bounds[2:]) <= 0:
@@ -549,10 +550,10 @@ def native_helper(explicit):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Capture a Windows window as semantic SVG, or replay a saved PNG/UIA pair")
+    parser = argparse.ArgumentParser(description="Render a semantic PNG capture as SVG, or capture a Windows window")
     parser.add_argument("output", type=Path)
-    parser.add_argument("--image", type=Path, help="Replay an existing captured PNG")
-    parser.add_argument("--uia", type=Path, help="UIA snapshot paired with --image")
+    parser.add_argument("--image", type=Path, help="Replay a PNG with an embedded UIA snapshot")
+    parser.add_argument("--uia", type=Path, help="Optional JSON sidecar for a legacy PNG capture")
     parser.add_argument("--helper", type=Path, help="Native Windows helper executable")
     parser.add_argument("--hwnd", help="Capture a specific window handle (decimal or 0x hexadecimal)")
     parser.add_argument("--foreground", action="store_true", help="Capture the foreground window after --delay")
@@ -566,8 +567,8 @@ def main(argv=None):
     try:
         if args.output.suffix.lower() != ".svg":
             raise ValueError("Output must have an .svg extension")
-        if bool(args.image) != bool(args.uia):
-            raise ValueError("Replay requires both --image and --uia")
+        if args.uia and not args.image:
+            raise ValueError("--uia requires --image")
         if not 0 <= args.delay <= 60 or (args.hwnd and args.foreground):
             raise ValueError("Delay must be 0–60; choose --hwnd or --foreground")
         if args.image and (args.hwnd or args.foreground or args.delay or args.helper):
@@ -591,11 +592,20 @@ def main(argv=None):
             if result.returncode:
                 return result.returncode
         outputs = [args.output, args.scene, args.html]
-        if any(p and p.resolve() in {image_path.resolve(), uia_path.resolve()} for p in outputs):
+        inputs = {p.resolve() for p in (image_path, uia_path) if p}
+        if any(p and p.resolve() in inputs for p in outputs):
             raise ValueError("Output paths must not overwrite capture inputs")
         if len({p.resolve() for p in outputs if p}) != sum(p is not None for p in outputs):
             raise ValueError("Output, scene, and HTML paths must differ")
-        snapshot = json.loads(uia_path.read_text(encoding="utf-8"))
+        if args.image:
+            snapshot = json.loads(uia_path.read_text(encoding="utf-8")) if uia_path else read_snapshot(image_path)
+        else:
+            # New helpers embed the snapshot. Only fall back for pre-chunk helpers.
+            from .snapshot import png_chunks
+            if any(png_chunks(image_path)):
+                snapshot = read_snapshot(image_path)
+            else:
+                snapshot = json.loads(uia_path.read_text(encoding="utf-8"))
         with Image.open(image_path) as image:
             image.load()
             validate_snapshot(snapshot, image)

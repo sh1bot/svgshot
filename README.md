@@ -181,7 +181,8 @@ and the existing simplified vector artwork for details UIA does not expose.
 Small raster fallback is **off by default** in this tool; `--allow-raster` opts in.
 The ordinary PNG conversion command retains its existing behavior.
 
-The helper is C++20 with Windows SDK dependencies only. Live capture requires
+The helper is C++20 using the Windows SDK and a bundled miniz compression encoder.
+Building requires no extra library installation or download. Live capture requires
 Windows 10 version 1903 or later, a desktop supporting Windows Graphics Capture,
 and a non-minimized target window. Install Visual Studio's **Desktop development
 with C++** workload, a Windows 10/11 SDK, and CMake. From the repository root,
@@ -218,12 +219,54 @@ The captured bitmap is a fresh window frame after selection, not that frozen
 selection preview. UIA extraction has a 20-second provider timeout and limits
 of 5000 elements / 64 levels; any truncation is recorded in the snapshot.
 
-Each live capture saves `capture.png` and `capture.uia.json` beside `capture.svg`.
-Keep the PNG/JSON pair together: they record the original image size, physical
-screen origin, accessible hierarchy, names, roles, values, focus, enabled state,
-selection, toggles, expansion, keyboard hints, and available visible text ranges.
-Password text/value and descendants are excluded by the native collector.
-These sidecars allow reprocessing on Windows, Linux, or macOS without recapture:
+The native capture and SVG conversion tools can run independently:
+
+```powershell
+.\build\capture\Release\svgshot-capture-win.exe --out capture
+.\.venv\Scripts\python.exe -m svgshot.capture revised.svg --image capture.png --html revised.html
+```
+
+Each live capture saves **one self-contained `capture.png`**, with a compressed
+UTF-8 JSON UIA snapshot in a private PNG `suIA` chunk. The native `--json` option
+also exports `capture.uia.json`; `--uia-only` writes only that JSON, without a PNG.
+Extract the embedded snapshot on any platform with:
+
+```sh
+python -m svgshot.snapshot capture.png --json capture.uia.json
+```
+
+The collector retains the Raw View tree, including offscreen nodes. Schema v2
+adds typed UIA property values and statuses, registered property/pattern names,
+pattern availability, relationship IDs, text selections, line attributes, and
+formatting runs. Built-in property IDs 30000–30199 are queried when registered
+by the installed UIA runtime; built-in patterns 10000–10034 and text attributes
+40000–40043 are covered. Pattern state properties preserve table/grid structure,
+headers, range limits, scroll positions, accessibility relationships, and more.
+No Invoke, SetValue, Scroll, Realize, focus-setting, or other control actions run.
+Properties distinguish values, unsupported values, read failures, mixed text
+attributes, redactions, and values that cannot be serialized. The existing
+convenience fields remain for renderer compatibility; the typed property records
+are authoritative when those convenience fields are empty/defaulted on failure.
+Password contents and descendants remain redacted.
+
+This is a bounded descriptive snapshot, not an exhaustive UIA object dump.
+Custom property/pattern registrations are not discovered, unknown COM objects
+are marked unserialized, and virtualized elements are not realized. Limits and
+redaction policy are stored in `capture_policy`; tree/text truncation produces
+warnings. Text has up to 2000 lines, 2048 formatting runs, and 256 selections per
+element, with a 65536 UTF-16-character limit per text range. UIA references retain
+runtime IDs even when their target lies outside the captured tree.
+
+The `suIA` payload has a 16-byte big-endian header: 8-byte `SVGSHOT\0` magic,
+container version 1, encoding 1 (JSON), compression 1 (zlib/DEFLATE), reserved zero,
+and a 4-byte uncompressed length. A separate zlib stream follows. PNG framing
+supplies the chunk length and CRC. Writers put the chunk before `IEND`; readers
+scan for it. Limits are 64 MiB decompressed JSON and 16 MiB chunk payload. The
+chunk is ancillary, private, and unsafe to copy after image edits: an editor that
+does not understand it should discard it when modifying the image data. Ordinary
+viewers display the PNG; they do not automatically expose UIA semantics.
+
+Existing version-1 PNG/JSON pairs still work without recapture:
 
 ```sh
 python -m svgshot.capture revised.svg --image capture.png --uia capture.uia.json \

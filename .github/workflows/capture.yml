@@ -14,6 +14,9 @@ jobs:
         run: cmake -S capture/windows -B build/capture -A ${{ matrix.arch }}
       - name: Build
         run: cmake --build build/capture --config Release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Exercise UIA, window capture, and PNG encoding
         if: matrix.arch == 'x64'
         shell: pwsh
@@ -32,8 +35,15 @@ jobs:
             if ($snapshot.root.name -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
             $raw = Get-Content -Raw build/smoke.uia.json
             if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"toggle":1')) { throw 'Missing control semantics' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live --json
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
+            python -c "import json; from svgshot.snapshot import read_snapshot; s=read_snapshot('build/live.png'); assert s==json.load(open('build/live.uia.json', encoding='utf-8')); assert s['version']==2; assert s['property_names'] and s['pattern_names']; assert s['capture_policy']['actions_invoked'] is False; assert 'PasswordHiddenSentinel' not in json.dumps(s); walk=lambda n:[n]+[v for c in n['children'] if c for v in walk(c)]; nodes=walk(s['root']); assert any(n['password'] for n in nodes); assert all('properties' in n and 'patterns' in n and 'text_selection' in n for n in nodes); assert any(r.get('attributes') and r.get('format_runs') for n in nodes for r in n['text_ranges']); assert any(p.get('status')=='value' and p.get('value')==1 for n in nodes if n['name']=='Preserve semantics' for k,p in n['properties'].items() if 'ToggleState' in s['property_names'][k])"
+            if ($LASTEXITCODE -ne 0) { throw 'Embedded snapshot or broad semantics validation failed' }
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/embedded
+            if ($LASTEXITCODE -ne 0) { throw 'Self-contained capture failed' }
+            if (Test-Path build/embedded.uia.json) { throw 'Default capture unexpectedly writes JSON sidecar' }
+            python -m svgshot.snapshot build/embedded.png --json build/extracted.json
+            if ($LASTEXITCODE -ne 0) { throw 'PNG-only extraction failed' }
             Add-Type -AssemblyName System.Drawing
             $png = [System.Drawing.Image]::FromFile((Resolve-Path build/live.png))
             try {
