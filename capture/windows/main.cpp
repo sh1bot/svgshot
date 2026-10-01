@@ -44,6 +44,33 @@ std::string utf8(const std::wstring &s)
                         nullptr);
     return out;
 }
+std::string hresult_message(const winrt::hresult_error &error)
+{
+    char code[11];
+    sprintf_s(code, "0x%08X", static_cast<unsigned int>(error.code().value));
+    return std::string(code) + ": " + utf8(error.message().c_str());
+}
+// Preserve the failing operation and HRESULT; localized COM messages alone
+// (especially E_INVALIDARG) cannot distinguish UIA, WGC, D3D and WIC failures.
+template <typename F> auto capture_step(const char *step, F action) -> decltype(action())
+{
+    try
+    {
+        return action();
+    }
+    catch (const winrt::hresult_error &error)
+    {
+        throw std::runtime_error(std::string(step) + ": " + hresult_message(error));
+    }
+    catch (const std::exception &error)
+    {
+        throw std::runtime_error(std::string(step) + ": " + error.what());
+    }
+}
+void check_step(HRESULT hr, const char *step)
+{
+    capture_step(step, [hr] { check_hresult(hr); });
+}
 std::string json(const std::wstring &s)
 {
     std::string out = "\"";
@@ -662,7 +689,8 @@ std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden)
             {
                 Reader reader(bounds(hwnd), include_hidden);
                 com_ptr<IUIAutomationElement> root;
-                check_hresult(reader.automation->ElementFromHandle(hwnd, root.put()));
+                check_step(reader.automation->ElementFromHandle(hwnd, root.put()),
+                           "UIA ElementFromHandle");
                 result->root = reader.node(root.get());
                 result->property_names = reader.data->property_names;
                 result->pattern_names = reader.data->pattern_names;
@@ -673,7 +701,7 @@ std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden)
         }
         catch (const winrt::hresult_error &e)
         {
-            result->error = utf8(e.message().c_str());
+            result->error = hresult_message(e);
         }
         catch (const std::exception &e)
         {
@@ -841,14 +869,14 @@ std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
     com_ptr<IWICBitmapFrameEncode> frame;
     check_hresult(encoder->CreateNewFrame(frame.put(), nullptr));
     check_hresult(frame->Initialize(nullptr));
-    check_hresult(frame->SetSize(width, height));
+    check_step(frame->SetSize(width, height), "WIC SetSize");
     WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    check_hresult(frame->SetPixelFormat(&format));
+    check_step(frame->SetPixelFormat(&format), "WIC SetPixelFormat");
     if (format != GUID_WICPixelFormat32bppBGRA)
         throw std::runtime_error("PNG encoder does not support BGRA");
-    check_hresult(frame->WritePixels(height, stride, stride * height, pixels));
-    check_hresult(frame->Commit());
-    check_hresult(encoder->Commit());
+    check_step(frame->WritePixels(height, stride, stride * height, pixels), "WIC WritePixels");
+    check_step(frame->Commit(), "WIC frame Commit");
+    check_step(encoder->Commit(), "WIC encoder Commit");
     STATSTG stat{};
     check_hresult(stream->Stat(&stat, STATFLAG_NONAME));
     std::string png(static_cast<size_t>(stat.cbSize.QuadPart), '\0');
@@ -881,13 +909,17 @@ SIZE capture_png(HWND hwnd, std::string &png)
     auto interop =
         winrt::get_activation_factory<capture::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
     capture::GraphicsCaptureItem item{nullptr};
-    check_hresult(interop->CreateForWindow(hwnd, winrt::guid_of<capture::GraphicsCaptureItem>(),
-                                           winrt::put_abi(item)));
-    auto pool = capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
-        runtimeDevice,
-        winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
-        item.Size());
-    auto session = pool.CreateCaptureSession(item);
+    check_step(interop->CreateForWindow(hwnd, winrt::guid_of<capture::GraphicsCaptureItem>(),
+                                      winrt::put_abi(item)), "WGC CreateForWindow");
+    auto pool = capture_step("WGC CreateFreeThreaded", [&] {
+        return capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
+            runtimeDevice,
+            winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2,
+            item.Size());
+    });
+    auto session = capture_step("WGC CreateCaptureSession", [&] {
+        return pool.CreateCaptureSession(item);
+    });
     try
     {
         session.IsCursorCaptureEnabled(false);
@@ -910,7 +942,7 @@ SIZE capture_png(HWND hwnd, std::string &png)
             state->ready.notify_one();
         }
     });
-    session.StartCapture();
+    capture_step("WGC StartCapture", [&] { session.StartCapture(); });
     {
         std::unique_lock<std::mutex> lock(state->mutex);
         if (!state->ready.wait_for(lock, std::chrono::seconds(8),
@@ -930,7 +962,8 @@ SIZE capture_png(HWND hwnd, std::string &png)
     auto access = frame.Surface()
                       .as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
     com_ptr<ID3D11Texture2D> texture;
-    check_hresult(access->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
+    check_step(access->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()),
+               "D3D GetInterface");
     auto size = frame.ContentSize();
     D3D11_TEXTURE2D_DESC desc{};
     texture->GetDesc(&desc);
@@ -942,13 +975,16 @@ SIZE capture_png(HWND hwnd, std::string &png)
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     desc.MiscFlags = 0;
     com_ptr<ID3D11Texture2D> staging;
-    check_hresult(device->CreateTexture2D(&desc, nullptr, staging.put()));
+    check_step(device->CreateTexture2D(&desc, nullptr, staging.put()), "D3D CreateTexture2D");
     context->CopyResource(staging.get(), texture.get());
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    check_hresult(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped));
+    check_step(context->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped), "D3D Map");
     try
     {
-        png = save_png(size.Width, size.Height, mapped.RowPitch, static_cast<BYTE *>(mapped.pData));
+        png = capture_step("Encode PNG", [&] {
+            return save_png(size.Width, size.Height, mapped.RowPitch,
+                            static_cast<BYTE *>(mapped.pData));
+        });
     }
     catch (...)
     {
@@ -1087,12 +1123,14 @@ int wmain(int argc, wchar_t **argv)
         }
         if (!IsWindow(hwnd) || IsIconic(hwnd))
             throw std::runtime_error("Target is missing or minimized");
-        RECT before = bounds(hwnd);
-        auto snapshot = read_uia(hwnd, includeHidden);
+        RECT before = capture_step("Read window bounds", [&] { return bounds(hwnd); });
+        auto snapshot = capture_step("Read UI Automation", [&] {
+            return read_uia(hwnd, includeHidden);
+        });
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
         if (!uiaOnly)
-            size = capture_png(hwnd, png);
+            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png); });
         RECT after = bounds(hwnd);
         if (!EqualRect(&before, &after))
             throw std::runtime_error("Window moved or resized during capture; try again");
@@ -1138,7 +1176,9 @@ int wmain(int argc, wchar_t **argv)
                "\"password_content\":\"redacted\",\"actions_invoked\":false,\"include_hidden_"
                "content\":"
             << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
-        auto normalized = unified::normalize(out.str());
+        auto normalized = capture_step("Normalize UI Automation snapshot", [&] {
+            return unified::normalize(out.str());
+        });
         if (!uiaOnly)
         {
             png = embedded_png(std::move(png), normalized);
@@ -1164,7 +1204,7 @@ int wmain(int argc, wchar_t **argv)
     }
     catch (const winrt::hresult_error &e)
     {
-        std::cerr << "svgshot-capture: " << utf8(e.message().c_str()) << '\n';
+        std::cerr << "svgshot-capture: " << hresult_message(e) << '\n';
         return 1;
     }
     catch (const std::exception &e)
