@@ -17,9 +17,8 @@ def walk(node):
 snapshot = read_snapshot('build/live.png')
 assert snapshot == json.loads(Path('build/live.uia.json').read_text(encoding='utf-8')), 'PNG/JSON mismatch'
 assert snapshot['version'] == 3, 'Wrong schema version'
-from svgshot.schema import validate, from_uia
+from svgshot.schema import validate
 validate(snapshot)
-assert snapshot == from_uia(snapshot['native']['snapshot']), 'Native/common normalization differs'
 snapshot = snapshot['native']['snapshot']
 assert snapshot['property_names'], 'No property registry'
 assert snapshot['pattern_names'], 'No pattern registry'

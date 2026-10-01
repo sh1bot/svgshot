@@ -7,7 +7,7 @@ import sys
 import subprocess
 from .grab import add_options, capture_bytes, options
 from .snapshot import read_snapshot
-from .schema import from_uia
+from .schema import validate
 
 
 def main(argv=None):
@@ -19,7 +19,6 @@ def main(argv=None):
     parser.add_argument('--config', type=Path)
     parser.add_argument('--no-ocr', action='store_true')
     parser.add_argument('--allow-raster', action='store_true')
-    parser.add_argument('--uia', type=Path, help='Legacy UIA JSON sidecar')
     add_options(parser)
     args = parser.parse_args(argv)
     try:
@@ -32,20 +31,17 @@ def main(argv=None):
         if len({p.resolve() for p in outputs}) != len(outputs):
             raise ValueError('Output paths must differ')
         if args.capture:
-            if args.uia:
-                raise ValueError('--uia is only for stored legacy captures')
             data = capture_bytes(**options(args))
             snapshot = read_snapshot(io.BytesIO(data))
         else:
             if any((args.helper,args.hwnd,args.window,args.foreground,args.delay,args.include_hidden_content,args.bitmap,args.window_bounds)):
                 raise ValueError('Live capture options require --capture')
-            inputs = [args.paths[0]] + ([args.uia] if args.uia else [])
+            inputs = [args.paths[0]]
             if any(p.resolve() in {i.resolve() for i in inputs} for p in outputs):
                 raise ValueError('Outputs must not overwrite capture inputs')
             data = args.paths[0].read_bytes()
-            snapshot = json.loads(args.uia.read_text(encoding='utf-8')) if args.uia else read_snapshot(io.BytesIO(data))
-        if snapshot.get('version') in (1,2):
-            snapshot = from_uia(snapshot)
+            snapshot = read_snapshot(io.BytesIO(data))
+        validate(snapshot)
         from PIL import Image
         from .capture import merge_uia, semantic_svg, accessible_html, validate_snapshot
         from .recognize import Options, reconstruct

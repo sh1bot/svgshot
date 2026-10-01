@@ -81,10 +81,10 @@ any PNG screenshot directly. The PNG is not modified.
 
 ## Capture data
 
-Capture metadata is a versioned, compressed JSON record embedded in the PNG.
+Capture metadata is a version 3, compressed JSON record embedded in the PNG's
+`seMA` chunk.
 The [schema reference](docs/capture-schema.md) describes its structure and the
-[JSON Schema](docs/capture.schema.json) defines its fields. Older UIA captures
-remain readable. Extract metadata with:
+[JSON Schema](docs/capture.schema.json) defines its fields. Extract metadata with:
 
 ```sh
 python -m svgshot.snapshot capture.png --json capture.json

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from .schema import from_uia, validate
+from .schema import validate
 from .snapshot import read_snapshot, embed_snapshot
 
 
@@ -50,7 +50,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
             command += ['--include-hidden-content']
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+60)
         png = result.stdout
-        snapshot = from_uia(read_snapshot(io.BytesIO(png)))
+        snapshot = read_snapshot(io.BytesIO(png))
     elif sys.platform == 'darwin':
         if hwnd or bitmap or window_bounds:
             raise ValueError('Windows/Linux options are not applicable on macOS')

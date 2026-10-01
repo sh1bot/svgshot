@@ -180,7 +180,7 @@ func embedded(_ png: Data, _ json: Data) throws -> Data {
     compressed.count=Int(size)
     var payload=Data([83,86,71,83,72,79,84,0,1,1,1,0]);payload.append(be32(UInt32(json.count)));payload.append(compressed)
     guard payload.count<=16*1024*1024 else {throw fail("Compressed snapshot exceeds limit")}
-    var body=Data("suIA".utf8);body.append(payload)
+    var body=Data("seMA".utf8);body.append(payload)
     let crc=body.withUnsafeBytes { crc32(0,$0.bindMemory(to:Bytef.self).baseAddress,uInt(body.count)) }
     var chunk=be32(UInt32(payload.count));chunk.append(body);chunk.append(be32(UInt32(crc)))
     var out=png;out.insert(contentsOf:chunk,at:png.count-12);return out

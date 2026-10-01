@@ -9,18 +9,17 @@ Additional invariants below apply even where JSON Schema cannot express them.
 
 ## Container and versions
 
-A PNG carries one `suIA` private ancillary, unsafe-to-copy chunk, immediately before
-IEND. Its existing 16-byte header is unchanged: `SVGSHOT\0` (8 bytes), container
+A PNG carries one `seMA` private ancillary, unsafe-to-copy chunk. Writers place it
+before IEND; readers scan the chunk stream. Its 16-byte header is `SVGSHOT\0` (8 bytes), container
 version 1, encoding 1 (UTF-8 JSON), compression 1 (zlib-wrapped DEFLATE), reserved
 zero, and a big-endian uint32 uncompressed length. JSON schema version and container
 version are independent. Limits: 64 MiB uncompressed JSON, 16 MiB chunk payload.
 The image's IDAT streams are independent of the snapshot stream. Unsafe-to-copy
 means image editors should discard this chunk when changing pixels.
 
-Version 3 identifies itself with `format: "svgshot.capture"`. Versions 1 and 2 are
-legacy Windows UIA snapshots; importers normalize them, retaining their original
-privacy-filtered payload under `native.snapshot`. Existing PNGs and JSON sidecars
-remain readable. Capturing never retroactively changes a stored corpus entry.
+The payload identifies version 3 with `format: "svgshot.capture"`. Readers accept
+only this schema and the `seMA` chunk; pre-schema PNG captures and sidecar files are
+not supported.
 
 ## Top-level fields
 
@@ -116,7 +115,7 @@ backend changes focus, selection, scroll position or values to obtain content.
 
 ## Native preservation and privacy
 
-Windows retains the existing broad v2 snapshot under `native.snapshot`, including
+Windows retains its provider-specific snapshot under `native.snapshot`, including
 typed UIA properties, patterns, text attributes, error statuses and capture limits.
 macOS and Linux currently retain node records under `native.nodes`, keyed by the
 same node IDs. `native_ref` identifies a node's native record. Native records are

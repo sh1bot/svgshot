@@ -691,7 +691,7 @@ std::vector<unsigned char> semantic_png(const Image &image, const J &snapshot) {
     throw std::runtime_error("Metadata exceeds 16 MiB");
   std::vector<unsigned char> chunk;
   be32(chunk, uint32_t(payload.size()));
-  chunk.insert(chunk.end(), {'s', 'u', 'I', 'A'});
+  chunk.insert(chunk.end(), {'s', 'e', 'M', 'A'});
   chunk.insert(chunk.end(), payload.begin(), payload.end());
   be32(chunk, uint32_t(crc32(0, chunk.data() + 4, uInt(chunk.size() - 4))));
   png.insert(png.end() - 12, chunk.begin(), chunk.end());

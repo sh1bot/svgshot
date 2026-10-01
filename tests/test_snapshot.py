@@ -24,11 +24,17 @@ class SnapshotTests(unittest.TestCase):
         self.png = self.directory/'capture.png'
         Image.new('RGB', (120, 80), '#abcdee').save(self.png)
         self.original = self.png.read_bytes()
-        self.snapshot = dict(version=2, screen_bounds=[20, 30, 120, 80], image_size=[120, 80],
-                             property_names={'30005': 'Name'}, root=dict(
-                                 name='Window Ω <&>', bounds=[20, 30, 120, 80], control_type=50032,
-                                 children=[], properties={'30005': dict(status='value', type=8, value='Window Ω <&>'),
-                                                          '30035': dict(status='not_supported')}))
+        self.snapshot = dict(format='svgshot.capture', version=3,
+                             source={'platform':'windows','provider':'windows-uia'},
+                             image={'size':[120,80],'coordinate_space':'image-pixels',
+                                    'source_bounds':[20,30,120,80],
+                                    'source_to_image':[1,0,0,1,-20,-30]},
+                             capture_policy={}, warnings=[],
+                             root={'id':'n1','role':'window','label':'Window Ω <&>',
+                                   'bounds':[0,0,120,80],'states':{},'relationships':{},
+                                   'text':{'status':'not_captured','lines':[]},
+                                   'value':{'status':'not_captured'},'children':[]},
+                             native={'provider':'windows-uia','snapshot':{}})
 
     def embed(self, data=None):
         payload = encode_snapshot(self.snapshot) if data is None else data
@@ -53,8 +59,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(main([str(self.png), '--json', str(exported)]), 0)
         self.assertEqual(json.loads(exported.read_text()), self.snapshot)
 
+    def test_old_chunk_name_is_not_read(self):
+        payload = encode_snapshot(self.snapshot)
+        old_chunk = struct.pack('>I', len(payload))+b'suIA'+payload
+        old_chunk += struct.pack('>I', zlib.crc32(b'suIA'+payload)&0xffffffff)
+        self.png.write_bytes(self.original[:-12]+old_chunk+self.original[-12:])
+        with self.assertRaisesRegex(ValueError, 'no embedded seMA'):
+            read_snapshot(self.png)
+
     def test_missing_corrupt_duplicate_and_truncated_chunks(self):
-        with self.assertRaisesRegex(ValueError, 'no embedded'):
+        with self.assertRaisesRegex(ValueError, 'no embedded seMA'):
             read_snapshot(self.png)
         payload = encode_snapshot(self.snapshot)
         self.embed()
@@ -89,8 +103,17 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             decode_snapshot(bytes(payload[:-2]))
 
+    def test_old_schema_is_rejected_even_with_the_current_chunk_name(self):
+        raw = json.dumps({'version':2,'image_size':[120,80],'screen_bounds':[0,0,120,80],
+                          'root':{'id':'old','children':[]}}).encode()
+        data = HEADER.pack(MAGIC, 1, 1, 1, 0, len(raw))+zlib.compress(raw)
+        with self.assertRaisesRegex(ValueError, 'Unsupported unified capture schema'):
+            decode_snapshot(data)
+        with self.assertRaisesRegex(ValueError, 'Unsupported unified capture schema'):
+            encode_snapshot({'version':2})
+
     def test_embedded_dimensions_must_match_bitmap(self):
-        self.snapshot['image_size'] = [119, 80]
+        self.snapshot['image']['size'] = [119, 80]
         self.embed()
         self.assertEqual(render_capture([str(self.directory/'out.svg'), '--image', str(self.png), '--no-ocr']), 1)
 

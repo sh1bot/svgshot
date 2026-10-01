@@ -1,4 +1,4 @@
-import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +10,7 @@ from svgshot.validate import render
 
 from svgshot.capture import main, local_box, merge_uia, semantic_svg, accessible_html
 from svgshot.model import Node, flatten
+from svgshot.snapshot import embed_snapshot
 
 
 def element(role, name, box, **extra):
@@ -23,7 +24,26 @@ def snapshot():
                         element(50002, 'Keep semantics', [120, 280, 190, 22]),
                         element(50020, 'Exact UIA spelling', [120, 320, 180, 20])]
     root['children'][1]['states'] = {'toggle': 1}
-    return dict(version=1, screen_bounds=[100, 200, 300, 180], image_size=[300, 180], root=root)
+    return dict(_renderer_view=True, screen_bounds=[100, 200, 300, 180], image_size=[300, 180], root=root)
+
+
+def semantic_snapshot():
+    root = {'id':'n1','role':'window','label':'Window <&>','bounds':[0,0,300,180],
+            'states':{},'relationships':{},'text':{'status':'not_captured','lines':[]},
+            'value':{'status':'not_captured'},'children':[
+                {'id':'n2','role':'button','label':'Add…','bounds':[20,25,90,30],
+                 'states':{},'relationships':{},'text':{'status':'not_captured','lines':[]},
+                 'value':{'status':'not_captured'},'children':[]},
+                {'id':'n3','role':'checkbox','label':'Keep semantics','bounds':[20,80,190,22],
+                 'states':{'checked':'checked'},'relationships':{},
+                 'text':{'status':'not_captured','lines':[]},
+                 'value':{'status':'not_captured'},'children':[]} ]}
+    return {'format':'svgshot.capture','version':3,
+            'source':{'platform':'windows','provider':'windows-uia'},
+            'image':{'size':[300,180],'coordinate_space':'image-pixels',
+                     'source_bounds':[100,200,300,180],
+                     'source_to_image':[1,0,0,1,-100,-200]},
+            'capture_policy':{},'warnings':[],'root':root}
 
 
 class CaptureTests(unittest.TestCase):
@@ -90,15 +110,19 @@ class CaptureTests(unittest.TestCase):
     def test_replay_cli_and_dimension_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
             d = Path(directory)
-            image, uia, output = d/'capture.png', d/'capture.uia.json', d/'capture.svg'
-            Image.new('RGB', (300, 180), 'white').save(image)
-            uia.write_text(json.dumps(snapshot()))
-            self.assertEqual(main([str(output), '--image', str(image), '--uia', str(uia), '--no-ocr', '--html', str(d/'capture.html')]), 0)
+            image, output = d/'capture.png', d/'capture.svg'
+            s = semantic_snapshot()
+            stream = io.BytesIO()
+            Image.new('RGB', (300, 180), 'white').save(stream, format='PNG')
+            original_png = stream.getvalue()
+            image.write_bytes(embed_snapshot(original_png, s))
+            self.assertEqual(main([str(output), '--image', str(image), '--no-ocr', '--html', str(d/'capture.html')]), 0)
             svg = ET.parse(output)
             self.assertEqual(svg.getroot().get('role'), 'graphics-document group')
             self.assertNotIn('<image ', output.read_text())
-            s = snapshot(); s['image_size'] = [5, 5]; uia.write_text(json.dumps(s))
-            self.assertEqual(main([str(output), '--image', str(image), '--uia', str(uia), '--no-ocr']), 1)
+            s['image']['size'] = [5, 5]
+            image.write_bytes(embed_snapshot(original_png, s))
+            self.assertEqual(main([str(output), '--image', str(image), '--no-ocr']), 1)
 
     def test_table_cells_and_icon_buttons_are_not_painted_as_form_controls(self):
         s = snapshot()

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <iterator>
 
-// suIA payload: "SVGSHOT\0", container version, JSON encoding, zlib compression,
+// seMA payload: "SVGSHOT\0", container version, JSON encoding, zlib compression,
 // reserved zero, uncompressed uint32 length (big endian), zlib stream.
 std::string embedded_png(std::string png, const std::string &snapshot)
 {
@@ -31,7 +31,7 @@ std::string embedded_png(std::string png, const std::string &snapshot)
         throw std::runtime_error("Cannot embed UIA in invalid PNG");
     std::string chunk;
     big_endian(chunk, static_cast<uint32_t>(payload.size()));
-    chunk += "suIA";
+    chunk += "seMA";
     chunk += payload;
     big_endian(chunk, static_cast<uint32_t>(
                           mz_crc32(0, reinterpret_cast<const unsigned char *>(chunk.data() + 4),
