@@ -39,7 +39,7 @@ std::string embedded_png(std::string png, const std::string &snapshot)
     png.insert(png.size() - 12, chunk);
     return png;
 }
-void write_capture(const std::filesystem::path &path, const std::string &png)
+void write_capture(const std::filesystem::path &path, const std::string &png, bool replace = true)
 {
     auto temporary = path;
     temporary += L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
@@ -54,7 +54,7 @@ void write_capture(const std::filesystem::path &path, const std::string &png)
         }
     }
     if (!MoveFileExW(temporary.c_str(), path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                     (replace ? MOVEFILE_REPLACE_EXISTING : 0) | MOVEFILE_WRITE_THROUGH))
     {
         auto error = GetLastError();
         std::filesystem::remove(temporary);

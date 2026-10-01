@@ -72,6 +72,11 @@ Each download is a single executable; `--version` prints its source commit. On
 Linux and macOS, run `chmod +x FILE` after downloading. To use a downloaded helper
 with the Python commands, pass `--helper FILE` or set `SVGSHOT_CAPTURE_HELPER`.
 
+The Windows executable also works directly: run it to pick a window and save a
+PNG on the Desktop, named with the local date, time and window title. To choose a
+filename, run `svgshot-capture-windows-x86_64.exe capture.png` (using your downloaded
+executable's name).
+
 Capture requires the platform accessibility service. macOS also requires
 Accessibility and Screen Recording permission. Linux captures pixels directly
 on X11; Wayland requires an explicitly supplied window image. See

@@ -29,19 +29,19 @@ jobs:
               Start-Sleep -Milliseconds 100
             }
             if ($fixture.MainWindowHandle -eq 0) { throw 'Fixture window did not open' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke --uia-only
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke.png --uia-only
             if ($LASTEXITCODE -ne 0) { throw 'UIA snapshot failed' }
             $snapshot = Get-Content -Raw build/smoke.uia.json | ConvertFrom-Json
             if ($snapshot.root.label -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
             $raw = Get-Content -Raw build/smoke.uia.json
             if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"checked":"checked"')) { throw 'Missing control semantics' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live --json
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live.png --json
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad --include-hidden-content
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad.png --include-hidden-content
             if ($LASTEXITCODE -ne 0) { throw 'Opt-in full capture failed' }
             python tests/native_capture_smoke.py "$($fixture.MainWindowHandle)"
             if ($LASTEXITCODE -ne 0) { throw 'Embedded snapshot or broad semantics validation failed' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/embedded
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/embedded.png
             if ($LASTEXITCODE -ne 0) { throw 'Self-contained capture failed' }
             if (Test-Path build/embedded.uia.json) { throw 'Default capture unexpectedly writes JSON sidecar' }
             python -m svgshot.snapshot build/embedded.png --json build/extracted.json
@@ -52,6 +52,19 @@ jobs:
               $live = Get-Content -Raw build/live.uia.json | ConvertFrom-Json
               if ($live.image.size[0] -ne $png.Width -or $live.image.size[1] -ne $png.Height) { throw 'PNG/UIA dimensions differ' }
             } finally { $png.Dispose() }
+            Add-Type -AssemblyName System.Drawing
+            $bitmap = [System.Drawing.Bitmap]::new((Resolve-Path build/compatibility.png).Path)
+            try {
+              $colors = @{}
+              for ($y = 0; $y -lt $bitmap.Height; $y += 9) {
+                for ($x = 0; $x -lt $bitmap.Width; $x += 9) {
+                  $pixel = $bitmap.GetPixel($x, $y)
+                  if ($pixel.A -ne 255) { throw 'Compatibility capture has transparent pixels' }
+                  $colors[$pixel.ToArgb()] = $true
+                }
+              }
+              if ($colors.Count -lt 4) { throw 'Compatibility capture appears blank' }
+            } finally { $bitmap.Dispose() }
           } finally { Stop-Process -Id $fixture.Id -ErrorAction SilentlyContinue }
       - uses: actions/upload-artifact@v4
         if: always()

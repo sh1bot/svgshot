@@ -56,3 +56,26 @@ if len(sys.argv)>1:
     assert streamed['root']['label']=='svgshot Capture Fixture'
     assert 'PasswordHiddenSentinel' not in json.dumps(streamed)
     print('Validated direct in-memory native PNG capture')
+    compatibility=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],
+        '--print-window','--stdout'],stdout=subprocess.PIPE,check=True,timeout=30)
+    compatible=read_snapshot(io.BytesIO(compatibility.stdout))
+    validate(compatible)
+    assert compatible['root']['label']=='svgshot Capture Fixture'
+    assert compatible['capture_policy']['bitmap_method']=='printwindow'
+    assert compatible['warnings'], 'Missing compatibility capture warning'
+    assert 'PasswordHiddenSentinel' not in json.dumps(compatible)
+    Path('build/compatibility.png').write_bytes(compatibility.stdout)
+    # An omitted output path must resolve to the actual Desktop folder and use
+    # a dated, titled PNG filename. Do not leave CI test captures on the Desktop.
+    result=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1]],
+        stdout=subprocess.PIPE,check=True,text=True,encoding='utf-8',timeout=30)
+    generated=Path(result.stdout.strip())
+    try:
+        import re
+        assert re.match(r'\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-\d{3} - svgshot Capture Fixture',generated.name)
+        assert generated.suffix=='.png'
+        assert generated.is_file()
+        validate(read_snapshot(generated))
+    finally:
+        generated.unlink(missing_ok=True)
+    print('Validated compatibility capture and automatic Desktop filename')

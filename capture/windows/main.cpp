@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <ole2.h>
 #include <richedit.h>
+#include <shlobj.h>
+#include <cwctype>
 #include <UIAutomation.h>
 #include <algorithm>
 #include <chrono>
@@ -888,8 +890,98 @@ std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
         throw std::runtime_error("Cannot read PNG memory stream");
     return png;
 }
-SIZE capture_png(HWND hwnd, std::string &png)
+SIZE capture_printwindow(HWND hwnd, std::string &png)
 {
+    DWORD affinity = 0;
+    if (GetWindowDisplayAffinity(hwnd, &affinity) && affinity != WDA_NONE)
+        throw std::runtime_error("Window excludes its content from capture");
+    struct Result
+    {
+        HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        SIZE size{};
+        std::string png, error;
+        ~Result() { if (done) CloseHandle(done); }
+    };
+    auto result = std::make_shared<Result>();
+    if (!result->done)
+        throw std::runtime_error("Cannot create compatibility capture event");
+    // PrintWindow asks only this window to paint, rather than copying desktop
+    // pixels that might belong to another application. It can block a provider.
+    std::thread worker([hwnd, result] {
+        struct Surface
+        {
+            HDC dc = CreateCompatibleDC(nullptr);
+            HBITMAP bitmap = nullptr;
+            HGDIOBJ old = nullptr;
+            ~Surface()
+            {
+                if (old) SelectObject(dc, old);
+                if (bitmap) DeleteObject(bitmap);
+                if (dc) DeleteDC(dc);
+            }
+        } surface;
+        bool initialized = false;
+        try
+        {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            initialized = true;
+            RECT r{};
+            if (!GetWindowRect(hwnd, &r))
+                throw std::runtime_error("Cannot read compatibility capture bounds");
+            LONG w = r.right - r.left, h = r.bottom - r.top;
+            if (w <= 0 || h <= 0 || static_cast<uint64_t>(w) * h > 64 * 1024 * 1024)
+                throw std::runtime_error("Invalid compatibility capture dimensions");
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            info.bmiHeader.biWidth = w;
+            info.bmiHeader.biHeight = -h;
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            void *pixels = nullptr;
+            if (!surface.dc)
+                throw std::runtime_error("Cannot create compatibility capture DC");
+            surface.bitmap = CreateDIBSection(surface.dc, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+            if (!surface.bitmap || !pixels)
+                throw std::runtime_error("Cannot allocate compatibility bitmap");
+            surface.old = SelectObject(surface.dc, surface.bitmap);
+            if (!surface.old || surface.old == HGDI_ERROR)
+            {
+                surface.old = nullptr;
+                throw std::runtime_error("Cannot select compatibility bitmap");
+            }
+            auto data = static_cast<BYTE *>(pixels);
+            std::fill_n(data, static_cast<size_t>(w) * h * 4, BYTE{255});
+            if (!PrintWindow(hwnd, surface.dc, 0))
+                throw std::runtime_error("PrintWindow failed (Windows error " +
+                                         std::to_string(GetLastError()) + ")");
+            // GDI drawing does not initialize the alpha channel.
+            for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4)
+                data[i] = 255;
+            result->png = capture_step("Encode compatibility PNG", [&] {
+                return save_png(w, h, w * 4, data);
+            });
+            result->size = {w, h};
+        }
+        catch (const winrt::hresult_error &e) { result->error = hresult_message(e); }
+        catch (const std::exception &e) { result->error = e.what(); }
+        if (initialized) winrt::uninit_apartment();
+        SetEvent(result->done);
+    });
+    if (WaitForSingleObject(result->done, 8000) != WAIT_OBJECT_0)
+    {
+        worker.detach();
+        throw std::runtime_error("PrintWindow did not respond within 8 seconds");
+    }
+    worker.join();
+    if (!result->error.empty()) throw std::runtime_error(result->error);
+    png = std::move(result->png);
+    return result->size;
+}
+SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility)
+{
+    if (compatibility)
+        return capture_printwindow(hwnd, png);
     if (!capture::GraphicsCaptureSession::IsSupported())
         throw std::runtime_error("Windows Graphics Capture is unavailable on this desktop");
     com_ptr<ID3D11Device> device;
@@ -909,8 +1001,22 @@ SIZE capture_png(HWND hwnd, std::string &png)
     auto interop =
         winrt::get_activation_factory<capture::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
     capture::GraphicsCaptureItem item{nullptr};
-    check_step(interop->CreateForWindow(hwnd, winrt::guid_of<capture::GraphicsCaptureItem>(),
-                                      winrt::put_abi(item)), "WGC CreateForWindow");
+    hr = interop->CreateForWindow(hwnd, winrt::guid_of<capture::GraphicsCaptureItem>(),
+                                 winrt::put_abi(item));
+    if (hr == E_INVALIDARG)
+    {
+        wchar_t windowClass[256]{};
+        GetClassNameW(hwnd, windowClass, 256);
+        std::cerr << "svgshot-capture: WGC rejected window: class=" << utf8(windowClass)
+                  << ", style=0x" << std::hex << GetWindowLongPtrW(hwnd, GWL_STYLE)
+                  << ", exstyle=0x" << GetWindowLongPtrW(hwnd, GWL_EXSTYLE) << std::dec
+                  << ", owned=" << (GetWindow(hwnd, GW_OWNER) != nullptr)
+                  << ", valid=" << IsWindow(hwnd) << ", visible=" << IsWindowVisible(hwnd) << '\n';
+        compatibility = true;
+        return capture_step("WGC CreateForWindow rejected this window (0x80070057); PrintWindow fallback",
+                            [&] { return capture_printwindow(hwnd, png); });
+    }
+    check_step(hr, "WGC CreateForWindow");
     auto pool = capture_step("WGC CreateFreeThreaded", [&] {
         return capture::Direct3D11CaptureFramePool::CreateFreeThreaded(
             runtimeDevice,
@@ -1053,6 +1159,35 @@ int fixture()
     }
     return 0;
 }
+std::filesystem::path desktop_capture_path(HWND hwnd)
+{
+    PWSTR folder = nullptr;
+    check_step(SHGetKnownFolderPath(FOLDERID_Desktop, KF_FLAG_DEFAULT, nullptr, &folder),
+               "Locate Desktop folder");
+    std::filesystem::path desktop(folder);
+    CoTaskMemFree(folder);
+    // GetWindowText reads the caption of a foreign process without sending a
+    // potentially blocking message to its controls.
+    wchar_t caption[256]{};
+    GetWindowTextW(hwnd, caption, 256);
+    std::wstring title(caption);
+    for (auto &c : title)
+        if (c < 32 || std::wstring(L"<>:\"/\\|?*").find(c) != std::wstring::npos) c = L'_';
+    if (title.size() > 100) title.resize(100);
+    if (!title.empty() && title.back() >= 0xd800 && title.back() <= 0xdbff) title.pop_back();
+    while (!title.empty() && (title.back() == L'.' || title.back() == L' ')) title.pop_back();
+    if (title.empty()) title = L"Window";
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t stamp[40];
+    swprintf_s(stamp, L"%04u-%02u-%02u_%02u-%02u-%02u-%03u", now.wYear, now.wMonth,
+               now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+    std::wstring stem = std::wstring(stamp) + L" - " + title;
+    auto output = desktop / (stem + L".png");
+    for (unsigned suffix = 2; std::filesystem::exists(output); ++suffix)
+        output = desktop / (stem + L" (" + std::to_wstring(suffix) + L").png");
+    return output;
+}
 int wmain(int argc, wchar_t **argv)
 {
     if (argc == 2 && std::wstring(argv[1]) == L"--version")
@@ -1065,9 +1200,9 @@ int wmain(int argc, wchar_t **argv)
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         HWND hwnd = nullptr;
-        std::wstring prefix;
+        std::filesystem::path outputPath;
         bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false,
-             stdoutPng = false;
+             stdoutPng = false, compatibility = false;
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -1075,7 +1210,7 @@ int wmain(int argc, wchar_t **argv)
             if (arg == L"--fixture")
                 return fixture();
             if (arg == L"--out" && i + 1 < argc)
-                prefix = argv[++i];
+                outputPath = argv[++i];
             else if (arg == L"--hwnd" && i + 1 < argc)
                 hwnd = reinterpret_cast<HWND>(std::stoull(argv[++i], nullptr, 0));
             else if (arg == L"--foreground")
@@ -1086,25 +1221,37 @@ int wmain(int argc, wchar_t **argv)
                 includeHidden = true;
             else if (arg == L"--stdout")
                 stdoutPng = true;
+            else if (arg == L"--print-window")
+                compatibility = true;
             else if (arg == L"--json")
                 jsonExport = true;
             else if (arg == L"--uia-only")
                 uiaOnly = true;
             else if (arg == L"--help")
             {
-                std::cout << "svgshot-capture --out PREFIX [--hwnd NUMBER | --foreground --delay "
+                std::cout << "svgshot-capture [FILE.png] [--hwnd NUMBER | --foreground --delay "
                              "SECONDS] [--json] [--uia-only] [--include-hidden-content]\nSelect a "
                              "window by clicking it; Esc "
                              "cancels. "
+                             "Without a filename, save a dated PNG on the Desktop. --out FILE.png "
+                             "also sets the filename. --print-window uses compatibility capture.\n"
                              "Requires Windows 10 1903+. Use --version for the source commit.\n";
                 return 0;
             }
+            else if (!arg.empty() && arg[0] != L'-' && outputPath.empty())
+                outputPath = arg;
             else
                 throw std::runtime_error("Unknown or incomplete option");
         }
-        if (prefix.empty() && !stdoutPng)
-            throw std::runtime_error("--out PREFIX or --stdout is required");
-        if (stdoutPng && (!prefix.empty() || jsonExport || uiaOnly))
+        bool automaticPath = outputPath.empty() && !stdoutPng;
+        if (!outputPath.empty())
+        {
+            auto extension = outputPath.extension().wstring();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                           [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+            if (extension != L".png") throw std::runtime_error("Output filename must end in .png");
+        }
+        if (stdoutPng && (!outputPath.empty() || jsonExport || uiaOnly))
             throw std::runtime_error("--stdout cannot be combined with file output options");
         if (delay < 0 || delay > 60)
             throw std::runtime_error("Delay must be between 0 and 60 seconds");
@@ -1123,6 +1270,7 @@ int wmain(int argc, wchar_t **argv)
         }
         if (!IsWindow(hwnd) || IsIconic(hwnd))
             throw std::runtime_error("Target is missing or minimized");
+        if (automaticPath) outputPath = desktop_capture_path(hwnd);
         RECT before = capture_step("Read window bounds", [&] { return bounds(hwnd); });
         auto snapshot = capture_step("Read UI Automation", [&] {
             return read_uia(hwnd, includeHidden);
@@ -1130,7 +1278,7 @@ int wmain(int argc, wchar_t **argv)
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
         if (!uiaOnly)
-            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png); });
+            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png, compatibility); });
         RECT after = bounds(hwnd);
         if (!EqualRect(&before, &after))
             throw std::runtime_error("Window moved or resized during capture; try again");
@@ -1146,8 +1294,15 @@ int wmain(int argc, wchar_t **argv)
         out << "{\"version\":2,\"screen_bounds\":" << rect_json(before) << ",\"image_size\":["
             << size.cx << ',' << size.cy << "],\"warnings\":[";
         bool warning = false;
+        if (compatibility && !uiaOnly)
+        {
+            out << "\"Bitmap captured with PrintWindow compatibility capture; inspect visual content.\"";
+            warning = true;
+            std::cerr << "svgshot-capture: using PrintWindow compatibility capture\n";
+        }
         if (snapshot->truncated)
         {
+            if (warning) out << ',';
             out << "\"UIA tree truncated at 5000 elements or 64 levels\"";
             warning = true;
         }
@@ -1173,7 +1328,9 @@ int wmain(int argc, wchar_t **argv)
                "\"max_format_runs_per_element\":2048,\"max_selections_per_element\":256,\"max_"
                "string_characters\":65536,"
                "\"timeout_seconds\":20,\"custom_properties\":\"not_discovered\","
-               "\"password_content\":\"redacted\",\"actions_invoked\":false,\"include_hidden_"
+               "\"password_content\":\"redacted\",\"actions_invoked\":false,\"bitmap_method\":\""
+            << (uiaOnly ? "none" : compatibility ? "printwindow" : "wgc")
+            << "\",\"include_hidden_"
                "content\":"
             << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
         auto normalized = capture_step("Normalize UI Automation snapshot", [&] {
@@ -1190,16 +1347,19 @@ int wmain(int argc, wchar_t **argv)
                     throw std::runtime_error("Cannot write PNG to stdout");
             }
             else
-                write_capture(std::filesystem::path(prefix + L".png"), png);
+                write_capture(outputPath, png, !automaticPath);
         }
         if (jsonExport || uiaOnly)
         {
-            std::ofstream file(std::filesystem::path(prefix + L".uia.json"), std::ios::binary);
+            auto jsonPath = outputPath;
+            jsonPath.replace_extension(L".uia.json");
+            std::ofstream file(jsonPath, std::ios::binary);
             file << normalized;
             file.close();
             if (!file)
                 throw std::runtime_error("Cannot write UIA JSON export");
         }
+        if (!stdoutPng && !uiaOnly) std::cout << utf8(outputPath.wstring()) << '\n';
         return 0;
     }
     catch (const winrt::hresult_error &e)
