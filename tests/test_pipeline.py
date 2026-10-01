@@ -16,6 +16,7 @@ from svgshot.recognize import (Options, _blue_window_surfaces,
                                _embedded_panels, _focused_controls, _disabled_buttons,
                                _footer_surface,
                                _multicolor_marks, _window_close_controls,
+                               _clipped_outline,
                                _window_shell, _refine_ambiguous_text,
                                _covered_small_fragment,
                                reconstruct)
@@ -25,6 +26,12 @@ from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
 
 
 class PipelineTest(unittest.TestCase):
+    def test_partial_border_at_capture_edge_is_not_a_panel(self):
+        clipped = Node("outline", (182, 574, 577, 68))
+        complete = Node("outline", (100, 100, 200, 80))
+        self.assertTrue(_clipped_outline(clipped, 766, 643))
+        self.assertFalse(_clipped_outline(complete, 766, 643))
+
     def test_ambiguous_ocr_is_retried_as_a_local_label(self):
         source = Image.new("RGB", (100, 60), "white")
         text = Node("text", (20, 20, 40, 9), text="see.", confidence=.55)

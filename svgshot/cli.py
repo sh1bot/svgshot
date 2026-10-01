@@ -120,7 +120,7 @@ def _semantic_convert(data, snapshot, output, args):
             config.font_family = args.font_family
         if args.lang:
             config.language = args.lang
-        scene = merge_uia(reconstruct(image, config), image, snapshot)
+        scene = merge_uia(reconstruct(image, config), image, snapshot, config.language)
         svg = semantic_svg(scene, snapshot, config.font_family)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(svg, encoding="utf-8")

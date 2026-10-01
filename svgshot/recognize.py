@@ -573,6 +573,12 @@ def _classify(component: np.ndarray, width: int, height: int) -> tuple[str, floa
     return "unknown", .25
 
 
+def _clipped_outline(node: Node, width: int, height: int) -> bool:
+    x,y,bw,bh=node.box
+    return (node.kind=="outline" and bw*bh>width*height*.02 and
+            (x<=1 or y<=1 or x+bw>=width-1 or y+bh>=height-1))
+
+
 def _raster(image: Image.Image, box) -> str:
     x, y, w, h = box
     buffer = io.BytesIO()
@@ -1149,6 +1155,9 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
             n.box[2]*n.box[3] > panel.box[2]*panel.box[3]*.85
             for panel in shell)]
         structural = shell+structural
+    # A group-box detector can join an interior divider to the captured
+    # window's outside frame. That partial edge is not a complete panel.
+    structural = [n for n in structural if not _clipped_outline(n,w,h)]
     if options.ocr:
         for label in _text_area_labels(pixels,rgb_image,structural,options.language):
             texts = [old for old in texts if _iou_boxes(old.box,label.box)<.2]
@@ -1383,6 +1392,7 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
     # unknown outer component. Keeping that outer crop duplicates its text.
     candidates = [node for node in candidates if not (
         (node.kind == "outline" and node.box[2] > w*.7 and node.box[3] > h*.65) or
+        _clipped_outline(node,w,h) or
         any(_contains(control,node,3) or _contains(node,control,3) for control in controls))]
     candidates = [node for node in candidates if not any(_contains(mark,node,2) for mark in marks)]
     candidates = [node for node in candidates if not any(

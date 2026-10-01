@@ -1,6 +1,7 @@
 import io
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -106,6 +107,15 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn('Minimize', texts)
         self.assertIn('Window <&>', texts)
         self.assertIn('Minimize', semantic_svg(scene, s))
+
+    def test_close_caption_keeps_its_icon_without_a_button_outline(self):
+        s = snapshot()
+        s['root']['children'] = [element(50000, 'Close', [350, 201, 46, 32],
+                                         class_name='Button', framework_id='Win32')]
+        scene = merge_uia(Node('root', (0, 0, 300, 180), color='#ffffff'),
+                          Image.new('RGB', (300, 180), 'white'), s)
+        self.assertFalse(any(n.kind == 'outlined-button' for n in flatten(scene)))
+        self.assertIn('Close', semantic_svg(scene, s))
 
     def test_replay_cli_and_dimension_mismatch(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -249,6 +259,29 @@ class CaptureTests(unittest.TestCase):
         scene = Node('root', (0, 0, 300, 180), children=[Node('text', (25, 30, 60, 12), text='masked')])
         merge_uia(scene, Image.new('RGB', (300, 180)), s)
         self.assertFalse(any(n.kind == 'text' for n in flatten(scene)))
+
+    def test_visible_edit_text_is_recovered_from_its_own_bounds(self):
+        s = snapshot()
+        s['root']['children'] = [element(50004, 'Open:', [180, 220, 100, 22])]
+        scene = Node('root', (0, 0, 300, 180), color='#ffffff', children=[
+            Node('text', (5, 20, 116, 12), text='Open: | secpol.msc', color='#222222')])
+        detected = Node('text', (0, 2, 59, 12), text='secpol.msc', confidence=.89)
+        with patch('svgshot.capture._ocr_ui', return_value=[detected]):
+            merge_uia(scene, Image.new('RGB', (300, 180)), s)
+        values = [n for n in flatten(scene) if n.kind == 'text']
+        self.assertEqual([n.text for n in values], ['secpol.msc'])
+        self.assertEqual(values[0].vector_data['source'], 'ocr')
+
+    def test_overlapping_document_and_control_text_is_drawn_once(self):
+        s = snapshot()
+        s['root']['text_ranges'] = [{'text': 'Add…', 'rectangles': [[120, 225, 90, 30]]}]
+        scene = Node('root', (0, 0, 300, 180), color='#ffffff')
+        merged = merge_uia(scene, Image.new('RGB', (300, 180), 'white'), s)
+        self.assertEqual([n.text for n in flatten(merged) if n.kind == 'text'].count('Add…'), 1)
+        svg = semantic_svg(merged, s)
+        self.assertEqual(svg.count('aria-label="Add…, button"'), 1)
+        outline = accessible_html(svg, s).split('Captured interface information', 1)[1]
+        self.assertEqual(outline.count('<li>Add…, button</li>'), 1)
 
 
 if __name__ == '__main__':

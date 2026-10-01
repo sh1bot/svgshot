@@ -20,7 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 from .model import Node, flatten
-from .recognize import Options, reconstruct
+from .recognize import Options, reconstruct, _ocr_ui
 from .svg import to_svg, _font
 from .snapshot import read_snapshot
 from .schema import render_view, validate as validate_schema
@@ -104,6 +104,22 @@ def sample_color(image, box):
 
 def normalize(text):
     return " ".join(text.replace("&", "").replace("…", "...").casefold().split())
+
+
+def exposed_by_descendant(item, text):
+    """Whether a container's text is already represented by a child control."""
+    target = normalize(text)
+    if not target:
+        return False
+    for child in walk(item):
+        if child is item:
+            continue
+        if kind(child) in CAPTIONS and normalize(child.get("name", "")) == target:
+            return True
+        if any(normalize(line.get("text", "")) == target
+               for line in child.get("text_ranges", [])):
+            return True
+    return False
 
 
 def icon_text(text):
@@ -243,7 +259,7 @@ def terminal_text(image, item, snapshot):
     return nodes
 
 
-def merge_uia(scene, image, snapshot):
+def merge_uia(scene, image, snapshot, language="eng"):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
     Keep semantic names separate from visible captions: image and container
@@ -282,7 +298,7 @@ def merge_uia(scene, image, snapshot):
 
     def emit(text, box, owner, centered=False):
         text = text.strip("\r\n")
-        if not text or not box:
+        if not text.strip() or not box:
             return
         if icon_text(text):
             artwork.append(trace_artwork(image, box))
@@ -316,9 +332,16 @@ def merge_uia(scene, image, snapshot):
         signature = (text, ink)
         if signature in emitted:
             return
-        emitted.add(signature)
         for n in matches:
             suppressed.add(id(n))
+        area = max(1, ink[2]*ink[3])
+        for previous in text_nodes:
+            if normalize(previous.text) != normalize(text):
+                continue
+            shared = overlap(previous.box, ink)
+            if shared / max(1, min(area, previous.box[2]*previous.box[3])) >= .7:
+                return
+        emitted.add(signature)
         node = Node("text", ink, text=text, color="#171717",
                     vector_data={"source": "uia", "uia_id": owner.get("id", ""), "font_weight": 400})
         text_nodes.append(node)
@@ -328,6 +351,11 @@ def merge_uia(scene, image, snapshot):
         role = kind(item)
         if item.get("password") or id(item) in chrome:
             continue
+        caption = str(item.get("label", item.get("name", ""))).casefold()
+        titlebar_button = (role == "button" and box[1] <= 4 and box[3] <= 42
+                           and box[0] >= image.width-120
+                           and any(word in caption for word in
+                                   ("close", "minimize", "maximize", "restore")))
         if role == "button" and item.get("class_name") == "Button" and item.get("name"):
             native_caption_buttons.append(box)
         if role == "listitem":
@@ -340,9 +368,10 @@ def merge_uia(scene, image, snapshot):
             artwork.append(trace_artwork(image, box))
         native = (item.get("class_name") == "Button" and item.get("framework_id") == "Win32"
                   or not item.get("framework_id"))
-        if ((role in {"button", "splitbutton", "checkbox", "radiobutton"} and native)
+        if (not titlebar_button and
+                ((role in {"button", "splitbutton", "checkbox", "radiobutton"} and native)
                 or role == "edit" and id(item) not in cells
-                or role == "combobox" or role == "tabitem" and native):
+                or role == "combobox" or role == "tabitem" and native)):
             x, y, w, h = box
             shape = {"button": "outlined-button", "splitbutton": "outlined-button", "edit": "outline",
                      "combobox": "dropdown", "tabitem": "tab-active" if item.get("states", {}).get("selected") else "tab"}.get(role, "outline")
@@ -365,7 +394,7 @@ def merge_uia(scene, image, snapshot):
                 rects = line.get("rectangles", [])
                 # Never duplicate a single string across multiple rectangles.
                 # Native helper normally splits ranges by TextUnit_Line.
-                if len(rects) == 1:
+                if len(rects) == 1 and not exposed_by_descendant(item, line.get("text", "")):
                     emit(line.get("text", ""), local_box(rects[0], snapshot), item)
             if any(len(line.get("rectangles", [])) == 1 for line in ranges):
                 continue
@@ -412,6 +441,29 @@ def merge_uia(scene, image, snapshot):
             value = str(item["states"]["value"])
             if "\n" not in value and "\r" not in value:
                 emit(value, (x+4, y+2, max(1, w-8), max(1, h-4)), item)
+        elif role == "edit" and not item.get("password"):
+            # UIA may expose the edit control but omit its ValuePattern. If
+            # full-window OCR saw ink in the field, retry just that visible
+            # region so an adjacent label cannot consume the whole OCR line.
+            x, y, w, h = box
+            source_nodes = [n for n in ocr if overlap(n.box, box) > n.box[2]*n.box[3]*.12]
+            left, top, right, bottom = x+3, y+1, x+w-4, y+h-1
+            if source_nodes and right > left and bottom > top:
+                candidates = [n for n in _ocr_ui(image.crop((left, top, right, bottom)),
+                                                    language, psm=7)
+                              if n.confidence >= .65 and any(ch.isalnum() for ch in n.text)]
+                if candidates:
+                    value = max(candidates, key=lambda n: n.confidence)
+                    vx, vy, vw, vh = value.box
+                    value_box = (left+vx, top+vy, vw, vh)
+                    signature = (value.text, value_box)
+                    if signature not in emitted:
+                        emitted.add(signature)
+                        text_nodes.append(Node("text", value_box, text=value.text,
+                            color=source_nodes[0].color or "#171717", confidence=value.confidence,
+                            vector_data={"source": "ocr", "role": "field-value"}))
+                    suppressed.update(id(n) for n in source_nodes
+                                      if overlap(n.box, box) > n.box[2]*n.box[3]*.30)
 
     suppressed.update(id(n) for n in ocr if any(
         kind(item) == "scrollbar" and contains(local_box(item["bounds"], snapshot), n.box)
@@ -533,7 +585,8 @@ def semantic_svg(scene, snapshot, font_family="auto"):
             if not item.get("password"):
                 for line in item.get("text_ranges", []):
                     text = line.get("text", "")
-                    if text and normalize(text) != normalize(item.get("name", "")):
+                    if (text.strip() and normalize(text) != normalize(item.get("name", ""))
+                            and not exposed_by_descendant(item, text)):
                         parts.append(f'<g role="group" aria-label="{escape(text, quote=True)}"><title>{escape(text)}</title></g>')
         for child in item.get("children", []):
             accessible(child)
@@ -559,7 +612,10 @@ def accessible_html(svg, snapshot):
         label = escape(describe(item))
         lines = ""
         if not item.get("password"):
-            lines = "".join('<li>'+escape(line.get("text", ""))+'</li>' for line in item.get("text_ranges", []))
+            lines = "".join('<li>'+escape(line.get("text", ""))+'</li>'
+                             for line in item.get("text_ranges", [])
+                             if line.get("text", "").strip()
+                             and not exposed_by_descendant(item, line.get("text", "")))
         nested = '<ul>'+lines+children+'</ul>' if children or lines else ""
         return '<li>'+label+nested+'</li>' if local_box(item.get("bounds", []), snapshot) else children
     return ('<!doctype html><html lang="en"><meta charset="utf-8"><title>Window capture</title>'
@@ -643,7 +699,7 @@ def main(argv=None):
             options.fidelity_fallback = False
             if args.no_ocr:
                 options.ocr = False
-            scene = merge_uia(reconstruct(image, options), image, snapshot)
+            scene = merge_uia(reconstruct(image, options), image, snapshot, options.language)
             svg = semantic_svg(scene, snapshot, options.font_family)
             args.output.write_text(svg, encoding="utf-8")
             if args.scene:
