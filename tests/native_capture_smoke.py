@@ -77,6 +77,10 @@ if len(sys.argv)>1:
         if api == 'msaa':
             assert not any('tree truncated' in warning for warning in selected_snapshot['warnings']), \
                 'MSAA traversal repeated children until the node limit'
+            assert any(n.get('label') == 'Accessible service row' and n['role'] == 'listitem'
+                       for n in walk(selected_snapshot['root'])), 'MSAA missed nested list control contents'
+        assert selected_snapshot['capture_policy']['collector_integrity_level'] >= 0
+        assert selected_snapshot['capture_policy']['target_integrity_level'] == selected_snapshot['capture_policy']['collector_integrity_level']
     compatibility=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],
         '--print-window','--stdout'],stdout=subprocess.PIPE,check=True,timeout=30)
     compatible=read_snapshot(io.BytesIO(compatibility.stdout))

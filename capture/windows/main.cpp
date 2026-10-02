@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <ole2.h>
 #include <oleacc.h>
+#include <commctrl.h>
 #include <richedit.h>
 #include <shlobj.h>
 #include <cwctype>
@@ -867,9 +868,24 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
                     }
                 }
                 else if (children[i].vt == VT_I4)
-                    child_json = read_msaa_node(accessible, children[i], viewport, include_hidden,
-                                                debug_unredacted, depth + 1, count, truncated,
-                                                false, visited, identity_refs);
+                {
+                    // An ID can refer to a full object. Only S_FALSE/null means
+                    // a simple element whose properties live on its parent.
+                    com_ptr<IDispatch> dispatch;
+                    com_ptr<IAccessible> child_accessible;
+                    if (SUCCEEDED(accessible->get_accChild(children[i], dispatch.put())) && dispatch &&
+                        SUCCEEDED(dispatch->QueryInterface(IID_PPV_ARGS(child_accessible.put()))))
+                    {
+                        VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
+                        child_json = read_msaa_node(child_accessible.get(), self, viewport, include_hidden,
+                                                    debug_unredacted, depth + 1, count, truncated,
+                                                    true, visited, identity_refs);
+                    }
+                    else
+                        child_json = read_msaa_node(accessible, children[i], viewport, include_hidden,
+                                                    debug_unredacted, depth + 1, count, truncated,
+                                                    false, visited, identity_refs);
+                }
                 if (!child_json.empty() && child_json != "null")
                 {
                     if (result.back() != '[') result += ',';
@@ -944,17 +960,49 @@ int accessibility_score(const std::string &raw)
         int score = 0;
         int type = static_cast<int>(n.GetNamedNumber(L"control_type", UIA_CustomControlTypeId));
         auto name = n.GetNamedString(L"name", L"");
-        if (!name.empty() && type != UIA_WindowControlTypeId && type != UIA_PaneControlTypeId)
+        auto box = n.GetNamedArray(L"bounds", JsonArray());
+        bool visible = !n.GetNamedBoolean(L"offscreen", true) && box.Size() == 4 &&
+                       box.GetNumberAt(2) > 0 && box.GetNumberAt(3) > 0;
+        if (visible && !name.empty() && type != UIA_WindowControlTypeId && type != UIA_PaneControlTypeId)
             score += 3;
-        if (type == UIA_TextControlTypeId || type == UIA_EditControlTypeId)
+        if (visible && (type == UIA_TextControlTypeId || type == UIA_EditControlTypeId))
             score += 1;
         for (auto line : n.GetNamedArray(L"text_ranges", winrt::Windows::Data::Json::JsonArray()))
-            if (!line.GetObject().GetNamedString(L"text", L"").empty()) score += 4;
+            if (visible && !line.GetObject().GetNamedString(L"text", L"").empty()) score += 4;
         for (auto child : n.GetNamedArray(L"children", JsonArray()))
             score += visit(child.GetObject());
         return score;
     };
     return visit(root);
+}
+
+// Compare integrity levels without retaining process IDs or token contents.
+int process_integrity(DWORD pid)
+{
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return -1;
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token))
+    {
+        CloseHandle(process);
+        return -1;
+    }
+    DWORD needed = 0;
+    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &needed);
+    std::vector<BYTE> buffer(needed);
+    int rid = -1;
+    if (needed && GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), needed, &needed))
+    {
+        auto label = reinterpret_cast<TOKEN_MANDATORY_LABEL *>(buffer.data());
+        if (IsValidSid(label->Label.Sid))
+        {
+            BYTE count = *GetSidSubAuthorityCount(label->Label.Sid);
+            if (count) rid = static_cast<int>(*GetSidSubAuthority(label->Label.Sid, count - 1));
+        }
+    }
+    CloseHandle(token);
+    CloseHandle(process);
+    return rid;
 }
 
 // Picker freezes the desktop visually, so its click cannot activate a target control.
@@ -1436,7 +1484,7 @@ int fixture()
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"svgshot Capture Fixture",
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 330, nullptr, nullptr,
+                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 460, nullptr, nullptr,
                               wc.hInstance, nullptr);
     CreateWindowW(L"BUTTON", L"Add…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20, 30, 100, 30, hwnd,
                   nullptr, wc.hInstance, nullptr);
@@ -1461,6 +1509,21 @@ int fixture()
     SendMessageW(rich, EM_SETSEL, 23, -1);
     SendMessageW(rich, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&hidden_format));
     SendMessageW(rich, EM_SETSEL, 0, 0);
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_LISTVIEW_CLASSES};
+    InitCommonControlsEx(&controls);
+    HWND container = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                                   20, 260, 380, 140, hwnd, nullptr, wc.hInstance, nullptr);
+    HWND list = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_BORDER | LVS_REPORT,
+                             0, 0, 380, 140, container, nullptr, wc.hInstance, nullptr);
+    LVCOLUMNW column{};
+    column.mask = LVCF_TEXT | LVCF_WIDTH;
+    column.pszText = const_cast<wchar_t *>(L"Service");
+    column.cx = 330;
+    SendMessageW(list, LVM_INSERTCOLUMNW, 0, reinterpret_cast<LPARAM>(&column));
+    LVITEMW row{};
+    row.mask = LVIF_TEXT;
+    row.pszText = const_cast<wchar_t *>(L"Accessible service row");
+    SendMessageW(list, LVM_INSERTITEMW, 0, reinterpret_cast<LPARAM>(&row));
     // Neither of these sentinel values is visible in the bitmap.
     CreateWindowW(L"EDIT", L"HiddenValueSentinel", WS_CHILD, 20, 10, 100, 20, hwnd, nullptr,
                   wc.hInstance, nullptr);
@@ -1600,6 +1663,16 @@ int wmain(int argc, wchar_t **argv)
         }
         if (!IsWindow(hwnd) || IsIconic(hwnd))
             throw std::runtime_error("Target is missing or minimized");
+        DWORD targetPid = 0;
+        GetWindowThreadProcessId(hwnd, &targetPid);
+        int collectorIntegrity = process_integrity(GetCurrentProcessId());
+        int targetIntegrity = process_integrity(targetPid);
+        std::string integrityWarning;
+        if (collectorIntegrity >= 0 && targetIntegrity > collectorIntegrity)
+        {
+            integrityWarning = "Target window runs at a higher integrity level; accessibility data may be incomplete. Run the capture helper as administrator for an elevated target.";
+            std::cerr << "svgshot-capture: " << integrityWarning << '\n';
+        }
         if (automaticPath) outputPath = desktop_capture_path(hwnd);
         RECT before = capture_step("Read window bounds", [&] { return bounds(hwnd); });
         std::shared_ptr<Snapshot> snapshot;
@@ -1711,6 +1784,12 @@ int wmain(int argc, wchar_t **argv)
             out << json(std::wstring(apiSelectionWarning.begin(), apiSelectionWarning.end()));
             warning = true;
         }
+        if (!integrityWarning.empty())
+        {
+            if (warning) out << ',';
+            out << json(std::wstring(integrityWarning.begin(), integrityWarning.end()));
+            warning = true;
+        }
         if (debugUnredacted)
         {
             if (warning) out << ',';
@@ -1729,6 +1808,8 @@ int wmain(int argc, wchar_t **argv)
             << (debugUnredacted ? "included" : "redacted")
             << "\",\"debug_unredacted\":" << (debugUnredacted ? "true" : "false")
             << ",\"accessibility_api_requested\":" << json(accessibilityApi)
+            << ",\"collector_integrity_level\":" << collectorIntegrity
+            << ",\"target_integrity_level\":" << targetIntegrity
             << ",\"accessibility_api_selected\":" << json(snapshot->provider == "windows-msaa" ? L"msaa" : L"uia")
             << ",\"actions_invoked\":false,\"bitmap_method\":\""
             << (uiaOnly ? "none" : screenCapture ? "screen" : compatibility ? "printwindow" : "wgc")
