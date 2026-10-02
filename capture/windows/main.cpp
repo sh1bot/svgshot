@@ -743,8 +743,8 @@ int msaa_control_type(const VARIANT &role)
     case ROLE_SYSTEM_CHECKBUTTON: return UIA_CheckBoxControlTypeId;
     case ROLE_SYSTEM_RADIOBUTTON: return UIA_RadioButtonControlTypeId;
     case ROLE_SYSTEM_COMBOBOX: return UIA_ComboBoxControlTypeId;
-    case ROLE_SYSTEM_TEXT: case ROLE_SYSTEM_STATICTEXT: return UIA_TextControlTypeId;
-    case ROLE_SYSTEM_EDIT: return UIA_EditControlTypeId;
+    case ROLE_SYSTEM_TEXT: return UIA_EditControlTypeId;
+    case ROLE_SYSTEM_STATICTEXT: return UIA_TextControlTypeId;
     case ROLE_SYSTEM_LINK: return UIA_HyperlinkControlTypeId;
     case ROLE_SYSTEM_LIST: return UIA_ListControlTypeId;
     case ROLE_SYSTEM_LISTITEM: return UIA_ListItemControlTypeId;
@@ -754,7 +754,6 @@ int msaa_control_type(const VARIANT &role)
     case ROLE_SYSTEM_MENUITEM: return UIA_MenuItemControlTypeId;
     case ROLE_SYSTEM_MENUBAR: return UIA_MenuBarControlTypeId;
     case ROLE_SYSTEM_TOOLBAR: return UIA_ToolBarControlTypeId;
-    case ROLE_SYSTEM_TAB: return UIA_TabControlTypeId;
     case ROLE_SYSTEM_PAGETAB: return UIA_TabItemControlTypeId;
     case ROLE_SYSTEM_PROGRESSBAR: return UIA_ProgressBarControlTypeId;
     case ROLE_SYSTEM_SLIDER: return UIA_SliderControlTypeId;
@@ -886,10 +885,10 @@ std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_u
         {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             com_ptr<IAccessible> root;
-            HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
+            HRESULT hr = AccessibleObjectFromWindow(hwnd, static_cast<DWORD>(OBJID_CLIENT), IID_IAccessible,
                                                      root.put_void());
             if (FAILED(hr) || !root)
-                hr = AccessibleObjectFromWindow(hwnd, OBJID_WINDOW, IID_IAccessible,
+                hr = AccessibleObjectFromWindow(hwnd, static_cast<DWORD>(OBJID_WINDOW), IID_IAccessible,
                                                 root.put_void());
             if (FAILED(hr) || !root)
                 throw std::runtime_error("AccessibleObjectFromWindow returned no IAccessible object");

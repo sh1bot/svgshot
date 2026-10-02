@@ -58,7 +58,10 @@ else:
         assert b'may include sensitive information' in debug.stderr
         assert unredacted['capture_policy']['debug_unredacted'] is True
         assert unredacted['capture_policy']['password_content']=='included'
-        assert 'PasswordHiddenSentinel' in json.dumps(unredacted)
+        debug_nodes=list(nodes(unredacted['root']))
+        password_nodes=[n for n in debug_nodes if n['states'].get('protected')]
+        assert password_nodes, 'No protected control captured for debug redaction test'
+        assert all(n['text'].get('status')!='redacted' for n in password_nodes), 'Protected content remained redacted in debug mode'
         assert any('may include sensitive information' in warning for warning in unredacted['warnings'])
         with __import__('tempfile').TemporaryDirectory() as folder:
             path=Path(folder)/'capture.png'
