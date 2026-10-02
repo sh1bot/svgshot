@@ -9,6 +9,7 @@ from PIL import Image
 from svgshot.schema import render_view, validate
 from svgshot.snapshot import embed_snapshot,read_snapshot
 from svgshot.cli import main
+from svgshot.model import Node
 
 
 def semantic_capture():
@@ -68,7 +69,7 @@ class UnifiedSchemaTests(unittest.TestCase):
             root=Path(folder);source=root/'plain.png';output=root/'plain.svg'
             source.write_bytes(stream.getvalue())
             stderr=io.StringIO()
-            with patch('svgshot.cli.reconstruct',return_value=object()) as analyze, \
+            with patch('svgshot.cli.reconstruct',return_value=Node('window',(0,0,8,8))) as analyze, \
                  patch('svgshot.cli.to_svg',return_value='<svg/>') as render, \
                  redirect_stderr(stderr):
                 self.assertEqual(main([str(source),str(output),'--no-ocr']),0)

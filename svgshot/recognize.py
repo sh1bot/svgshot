@@ -19,6 +19,7 @@ from scipy import ndimage
 
 from .model import Node
 from .artwork import photo_regions, trace_artwork
+from .icons import simplify_scene_artwork
 
 
 @dataclass
@@ -1432,13 +1433,14 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
             component = labels[region] == label
             kind, confidence = _classify(component, bw, bh)
             if kind == "unknown":
-                if not options.raster_fallback or max(bw, bh) > options.max_raster or area < 35:
+                if max(bw, bh) > options.max_raster or area < 35:
                     continue
                 crop = pixels[ys.start:ys.stop,xs.start:xs.stop].astype(np.int16)
                 base = np.median(crop.reshape(-1,3),axis=0)
                 if np.percentile(np.max(np.abs(crop-base),axis=2),95) < 75:
                     continue
-                node = Node("raster", box, confidence=confidence, image_data=_raster(rgb_image, box))
+                node = Node("raster", box, confidence=confidence,
+                            image_data=_raster(rgb_image, box) if options.raster_fallback else "")
             else:
                 # Quantization is only for segmentation: using the palette's
                 # averaged color can wash out a selected blue row to pale cyan.
@@ -1684,7 +1686,7 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
         right = max(n.box[0]+n.box[2] for n in all_nodes)
         bottom = max(n.box[1]+n.box[3] for n in all_nodes)
         root.children.append(Node("radio-group", (x,y,right-x,bottom-y), children=row))
-    return root
+    return simplify_scene_artwork(root, image, allow_raster=options.raster_fallback)
 
 
 def _iou_boxes(a,b):

@@ -13,6 +13,7 @@ from .capture import accessible_html, merge_uia, semantic_icon_boxes, semantic_s
 from .diagnostic import make_diagnostic
 from .grab import add_options, capture_bytes, options as capture_options
 from .recognize import Options, reconstruct
+from .icons import simplify_scene_artwork
 from .snapshot import MissingSnapshotError, read_snapshot
 from .svg import to_svg
 from .validate import add_fidelity_regions, compare
@@ -88,6 +89,7 @@ def _convert(data, snapshot, output, args):
         scene = reconstruct(source, options, artwork_boxes=icons)
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
+        simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback)
         def serialize():
             return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None
                     else to_svg(scene, options.font_family))

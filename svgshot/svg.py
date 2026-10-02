@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from html import escape
 from functools import lru_cache
+import json
+from collections import Counter
 from pathlib import Path
 import subprocess
 
@@ -77,6 +79,30 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
              f'viewBox="0 0 {width} {height}" role="img">',
              f'<rect width="{width}" height="{height}" fill="{root.color}"/>']
 
+    def artwork_paths(node):
+        output = []
+        for path in node.vector_data['paths']:
+            stroke = f' stroke="{path["fill"]}" stroke-width="0.5"' if node.vector_data.get('opaque') else ''
+            opacity = f' fill-opacity="{path["opacity"]}"' if 'opacity' in path else ''
+            edges = '' if node.vector_data.get('local') else ' shape-rendering="crispEdges"'
+            output.append(f'<path data-kind="capture-artwork"{edges} d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"{stroke}{opacity}/>')
+        return '\n'.join(output)
+
+    def artwork_key(node):
+        return json.dumps([node.vector_data['icon_size'],node.vector_data['paths']],sort_keys=True,separators=(',',':'))
+    icons = [n for n in flatten(root) if n.kind == 'capture-artwork' and n.vector_data.get('local')]
+    counts = Counter(artwork_key(n) for n in icons)
+    definitions = {}
+    for node in icons:
+        key = artwork_key(node)
+        if counts[key] > 1 and key not in definitions:
+            definitions[key] = f'icon-{len(definitions)}'
+            if len(definitions) == 1:
+                parts.append('<defs>')
+            parts.append(f'<g id="{definitions[key]}">{artwork_paths(node)}</g>')
+    if definitions:
+        parts.append('</defs>')
+
     filled = [node for node in flatten(root) if node.kind in ("rect", "button", "gradient-title",
                                                           "dialog-panel", "window-header", "selected-row",
                                                           "text-selection") or
@@ -119,9 +145,16 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
                 parts.append(f'<path d="{data["wave_path"]}" fill="{data["wave_color"]}"/>')
             parts.append('</g>')
         elif kind == "capture-artwork":
-            for path in node.vector_data["paths"]:
-                stroke = f' stroke="{path["fill"]}" stroke-width="0.5"' if node.vector_data.get("opaque") else ""
-                parts.append(f'<path data-kind="capture-artwork" shape-rendering="crispEdges" d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"{stroke}/>')
+            if node.vector_data.get('local'):
+                iw,ih = node.vector_data['icon_size']
+                transform = f'translate({x} {y}) scale({w/iw:g} {h/ih:g})'
+                key = artwork_key(node)
+                if key in definitions:
+                    parts.append(f'<use xlink:href="#{definitions[key]}" transform="{transform}"/>')
+                else:
+                    parts.append(f'<g transform="{transform}">{artwork_paths(node)}</g>')
+            else:
+                parts.append(artwork_paths(node))
         elif kind == "text":
             if node.vector_data.get("role") not in ("selected-text","disabled-text"):
                 paint = _contrast(paint, surface_at(node, surface),
