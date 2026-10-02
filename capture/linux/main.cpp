@@ -782,7 +782,7 @@ int main(int argc, char **argv) {
         std::cout
             << "svgshot-capture-linux [capture.png | --out capture.png | --stdout] [--window "
                "ID | --foreground] [--delay SECONDS] [--json capture.json] "
-               "[--include-hidden-content] [--debug-unredacted]\n  --list-windows   List "
+               "[--include-hidden-content] [--unredacted]\n  --list-windows   List "
                "capture-local AT-SPI window IDs\n  --version        Report "
                "source commit\n  --bitmap PNG --window-bounds X Y W H   "
                "Explicit Wayland bitmap pairing\nWithout a filename, save a dated PNG on the Desktop.\n";
@@ -812,7 +812,7 @@ int main(int argc, char **argv) {
         stdout_png = true;
       else if (arg == "--include-hidden-content")
         hidden = true;
-      else if (arg == "--debug-unredacted")
+      else if (arg == "--unredacted")
         debug_unredacted = true;
       else if (arg == "--list-windows")
         list = true;
@@ -824,7 +824,7 @@ int main(int argc, char **argv) {
     if (delay < 0 || delay > 60)
       throw std::runtime_error("Delay must be 0–60 seconds");
     if (debug_unredacted)
-      std::cerr << "WARNING: debug unredacted capture may include sensitive information, including passwords and offscreen content.\n";
+      std::cerr << "WARNING: unredacted capture may include sensitive information, including passwords and offscreen content.\n";
     if (!window.empty() && foreground)
       throw std::runtime_error("Choose --window or --foreground");
     if (!list) {
@@ -901,7 +901,7 @@ int main(int argc, char **argv) {
     Image image = bitmap.empty() ? screen_image(bounds) : load_image(bitmap);
     Reader reader{bounds, coords, hidden, debug_unredacted, image.width, image.height};
     if (debug_unredacted)
-      reader.warnings.insert("Debug unredacted capture may include sensitive information, including passwords and offscreen content.");
+      reader.warnings.insert("Unredacted capture may include sensitive information, including passwords and offscreen content.");
     reader.warnings.insert(
         bitmap.empty()
             ? "X11 capture records visible screen pixels; overlapping windows "

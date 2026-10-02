@@ -225,7 +225,7 @@ func desktopCaptureURL(_ title: String) throws -> URL {
                 print("svgshot-capture-macos \(captureBuildCommit)");return
             }
             if args.contains("--help") {
-                print("svgshot-capture-macos [capture.png | --out capture.png | --stdout] [--window CGWindowID | --foreground] [--delay SECONDS] [--list-windows] [--debug-unredacted]\nWithout a filename, save a dated PNG on the Desktop.");return
+                print("svgshot-capture-macos [capture.png | --out capture.png | --stdout] [--window CGWindowID | --foreground] [--delay SECONDS] [--list-windows] [--unredacted]\nWithout a filename, save a dated PNG on the Desktop.");return
             }
             var values:[String:String]=[:],flags=Set<String>(),filename:String?
             var i=0
@@ -234,7 +234,7 @@ func desktopCaptureURL(_ title: String) throws -> URL {
                 if ["--out","--window","--delay"].contains(arg) {
                     guard i+1<args.count else {throw fail("Incomplete option \(arg)")}
                     i+=1;values[arg]=args[i]
-                } else if ["--foreground","--stdout","--framed","--list-windows","--debug-unredacted"].contains(arg) {
+                } else if ["--foreground","--stdout","--framed","--list-windows","--unredacted"].contains(arg) {
                     flags.insert(arg)
                 } else if !arg.hasPrefix("-"),filename==nil {filename=arg}
                 else {throw fail("Unknown or duplicate argument \(arg)")}
@@ -253,8 +253,8 @@ func desktopCaptureURL(_ title: String) throws -> URL {
             func option(_ key: String) -> String? {return values[key]}
             let delay=Double(option("--delay") ?? "0") ?? -1
             guard delay>=0 && delay<=60 else { throw fail("Delay must be 0–60") }
-            let debugUnredacted=flags.contains("--debug-unredacted")
-            if debugUnredacted { fputs("WARNING: debug unredacted capture may include sensitive information, including passwords and offscreen content.\n",stderr) }
+            let debugUnredacted=flags.contains("--unredacted")
+            if debugUnredacted { fputs("WARNING: unredacted capture may include sensitive information, including passwords and offscreen content.\n",stderr) }
             if delay>0 { try await Task.sleep(nanoseconds:UInt64(delay*1_000_000_000)) }
             let content=try await SCShareableContent.excludingDesktopWindows(true,onScreenWindowsOnly:true)
             let windows=content.windows.filter { $0.frame.width>0 && $0.frame.height>0 && $0.owningApplication?.processID != getpid() }
@@ -293,7 +293,7 @@ func desktopCaptureURL(_ title: String) throws -> URL {
             let width=Int((window.frame.width*Double(filter.pointPixelScale)).rounded()), height=Int((window.frame.height*Double(filter.pointPixelScale)).rounded())
             config.width=width;config.height=height;config.showsCursor=false;config.ignoreShadowsSingleWindow=true
             let reader=Reader(before,width,height,debugUnredacted)
-            if debugUnredacted { reader.warnings.append("Debug unredacted capture may include sensitive information, including passwords and offscreen content.") }
+            if debugUnredacted { reader.warnings.append("Unredacted capture may include sensitive information, including passwords and offscreen content.") }
             guard var root=reader.node(target) else {throw fail("Accessibility tree unavailable")}
             // Remove relationships to nodes outside this capture; native refs remain local metadata.
             func prune(_ n: inout [String:Any]) {

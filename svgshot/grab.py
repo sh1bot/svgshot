@@ -51,7 +51,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
         if include_hidden_content:
             command += ['--include-hidden-content']
         if debug_unredacted:
-            command += ['--debug-unredacted']
+            command += ['--unredacted']
         if accessibility_api != 'auto':
             command += ['--accessibility-api', accessibility_api]
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+60)
@@ -61,7 +61,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
         if hwnd or bitmap or window_bounds:
             raise ValueError('Windows/Linux options are not applicable on macOS')
         if include_hidden_content and not debug_unredacted:
-            raise ValueError('macOS currently supports visible-content capture only; use --debug-unredacted to bypass redactions')
+            raise ValueError('macOS currently supports visible-content capture only; use --unredacted to bypass redactions')
         command = [helper(sys.platform, native_helper), '--framed']
         if window is not None:
             command += ['--window', str(window)]
@@ -70,7 +70,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
         if delay:
             command += ['--delay', str(delay)]
         if debug_unredacted:
-            command += ['--debug-unredacted']
+            command += ['--unredacted']
         if accessibility_api != 'auto':
             raise ValueError('--accessibility-api is currently available only on Windows')
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+90)
@@ -96,7 +96,7 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
         if include_hidden_content:
             command += ['--include-hidden-content']
         if debug_unredacted:
-            command += ['--debug-unredacted']
+            command += ['--unredacted']
         if accessibility_api != 'auto':
             raise ValueError('--accessibility-api is currently available only on Windows')
         if bitmap:
@@ -124,8 +124,8 @@ def add_options(parser):
     parser.add_argument('--foreground', action='store_true')
     parser.add_argument('--delay', type=int, default=0)
     parser.add_argument('--include-hidden-content', action='store_true')
-    parser.add_argument('--debug-unredacted', action='store_true',
-                        help='Debug only: include content normally redacted, including passwords; may capture sensitive information')
+    parser.add_argument('--unredacted', dest='debug_unredacted', action='store_true',
+                        help='Include content normally redacted, including passwords; may capture sensitive information')
     parser.add_argument('--accessibility-api', choices=('auto', 'uia', 'msaa'), default='auto',
                         help='Windows accessibility source (default: choose the richer UIA/MSAA tree)')
     parser.add_argument('--bitmap', type=Path, help='Linux: explicitly pair a window bitmap with the selected AT-SPI window')

@@ -329,7 +329,8 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                     w = min(w, first[0]+first[2]-x-2)
             if w > 0:
                 for candidate in _ocr_ui(image.crop((x,y,x+w,y+h)),language,psm=7):
-                    full_match = normalize(candidate.text).strip(" /") == normalize(text).strip(" /")
+                    border_marks = " /;,()" if kind(owner) == "tabitem" else " /"
+                    full_match = normalize(candidate.text).strip(border_marks) == normalize(text).strip(border_marks)
                     # Some suffix glyphs receive zero OCR confidence. A strong
                     # prefix plus additional ink in the same bounded cell lets
                     # the accessible name supply those missing characters.

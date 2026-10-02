@@ -48,6 +48,14 @@ def semantic_snapshot():
 
 
 class CaptureTests(unittest.TestCase):
+    def test_tab_border_ocr_does_not_become_caption_punctuation(self):
+        s = snapshot()
+        s['root']['children'] = [element(50019,'Standard',[120,225,100,28],framework_id='MSAA')]
+        scene = Node('root',(0,0,300,180),children=[Node('text',(30,30,75,18),text='Standard /')])
+        with patch('svgshot.capture._ocr_ui',return_value=[Node('text',(2,5,75,17),text='Standard ;')]):
+            merge_uia(scene,Image.new('RGB',(300,180),'white'),s)
+        self.assertEqual([n.text for n in flatten(scene) if n.kind=='text'],['Standard'])
+
     def test_header_sort_mark_is_excluded_without_masking_its_caption(self):
         s = snapshot()
         s['root']['children'] = [element(50035,'Name',[120,225,120,36],framework_id='MSAA')]

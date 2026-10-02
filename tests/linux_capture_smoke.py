@@ -52,7 +52,7 @@ else:
         all_nodes=list(nodes(snapshot['root']))
         assert any(n['states'].get('checked')=='checked' for n in all_nodes)
         assert any(n['text'].get('lines') for n in all_nodes),'Visible text ranges missing'
-        debug=subprocess.run([helper,'--window',target,'--stdout','--debug-unredacted'],
+        debug=subprocess.run([helper,'--window',target,'--stdout','--unredacted'],
                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
         unredacted=read_snapshot(io.BytesIO(debug.stdout));validate(unredacted)
         assert b'may include sensitive information' in debug.stderr

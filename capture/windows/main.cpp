@@ -1718,7 +1718,7 @@ int wmain(int argc, wchar_t **argv)
                 accessibilityApi = argv[++i];
             else if (arg == L"--include-hidden-content")
                 includeHidden = true;
-            else if (arg == L"--debug-unredacted")
+            else if (arg == L"--unredacted")
                 debugUnredacted = true;
             else if (arg == L"--stdout")
                 stdoutPng = true;
@@ -1734,7 +1734,7 @@ int wmain(int argc, wchar_t **argv)
             {
                 std::cout << "svgshot-capture [FILE.png] [--hwnd NUMBER | --foreground --delay "
                              "SECONDS] [--json] [--uia-only] [--include-hidden-content] "
-                             "[--debug-unredacted] [--accessibility-api auto|uia|msaa]\nSelect a "
+                             "[--unredacted] [--accessibility-api auto|uia|msaa]\nSelect a "
                              "window by clicking it; Esc "
                              "cancels. "
                              "Without a filename, save a dated PNG on the Desktop. --out FILE.png "
@@ -1763,7 +1763,7 @@ int wmain(int argc, wchar_t **argv)
         if (accessibilityApi != L"auto" && accessibilityApi != L"uia" && accessibilityApi != L"msaa")
             throw std::runtime_error("--accessibility-api must be auto, uia, or msaa");
         if (debugUnredacted)
-            std::cerr << "WARNING: debug unredacted capture may include sensitive information, including passwords and offscreen content.\n";
+            std::cerr << "WARNING: unredacted capture may include sensitive information, including passwords and offscreen content.\n";
         if (compatibility && screenCapture) throw std::runtime_error("Choose --print-window or --screen");
         if (hwnd && foreground)
             throw std::runtime_error("Choose --hwnd or --foreground");
@@ -1908,7 +1908,7 @@ int wmain(int argc, wchar_t **argv)
         if (debugUnredacted)
         {
             if (warning) out << ',';
-            out << "\"Debug unredacted capture may include sensitive information, including passwords and offscreen content.\"";
+            out << "\"Unredacted capture may include sensitive information, including passwords and offscreen content.\"";
             warning = true;
         }
         out << "],\"property_names\":" << snapshot->property_names

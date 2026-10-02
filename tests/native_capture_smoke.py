@@ -57,7 +57,7 @@ if len(sys.argv)>1:
     assert 'PasswordHiddenSentinel' not in json.dumps(streamed)
     print('Validated direct in-memory native PNG capture')
     debug = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
-        '--debug-unredacted', '--stdout'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        '--unredacted', '--stdout'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         check=True, timeout=30)
     unredacted = read_snapshot(io.BytesIO(debug.stdout))
     validate(unredacted)

@@ -138,7 +138,7 @@ def main(argv=None) -> int:
             if args.paths[0].suffix.lower() != ".png":
                 raise ValueError("Input must be a PNG")
             if args.debug_unredacted:
-                raise ValueError("--debug-unredacted requires --capture; redacted values cannot be recovered from an existing PNG")
+                raise ValueError("--unredacted requires --capture; redacted values cannot be recovered from an existing PNG")
             if args.accessibility_api != "auto":
                 raise ValueError("--accessibility-api requires --capture")
             if _has_capture_options(args):
