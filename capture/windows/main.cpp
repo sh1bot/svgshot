@@ -1594,7 +1594,7 @@ int fixture()
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
     HWND hwnd = CreateWindowW(wc.lpszClassName, L"svgshot Capture Fixture",
-                              WS_OVERLAPPEDWINDOW | WS_VISIBLE, 50, 50, 450, 460, nullptr, nullptr,
+                              WS_OVERLAPPEDWINDOW, 50, 50, 450, 460, nullptr, nullptr,
                               wc.hInstance, nullptr);
     CreateWindowW(L"BUTTON", L"Add…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 20, 30, 100, 30, hwnd,
                   nullptr, wc.hInstance, nullptr);
@@ -1639,6 +1639,9 @@ int fixture()
                   wc.hInstance, nullptr);
     CreateWindowW(L"EDIT", L"OutsideValueSentinel", WS_CHILD | WS_VISIBLE, 1000, 1000, 100, 20,
                   hwnd, nullptr, wc.hInstance, nullptr);
+    // CI discovers the visible main window. Publish it only after its controls
+    // and initial states exist, so a quick collector cannot read half a fixture.
+    ShowWindow(hwnd, SW_SHOW);
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
