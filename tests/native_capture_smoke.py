@@ -182,8 +182,8 @@ if len(sys.argv)>1:
             assert mixed['capture_policy']['bitmap_dpi_awareness'] == ('unaware' if context=='window' else 'per-monitor-v2')
             physical = raw['dpi']['after']['window']['physical_window_bounds']['value']
             logical = raw['dpi']['after']['window']['context_window_bounds']['value']
-            expected = logical if context=='window' else physical
-            assert mixed['image']['size'] == expected[2:], 'PrintWindow used the wrong coordinate dimensions'
+            assert mixed['image']['size'] == logical[2:], 'PrintWindow canvas does not match native drawing dimensions'
+            assert mixed['capture_policy']['bitmap_coordinate_space'] == 'window-context-pixels'
             assert mixed['image']['source_bounds'] == physical
             assert mixed['root']['label'] == 'svgshot Capture Fixture'
     finally:

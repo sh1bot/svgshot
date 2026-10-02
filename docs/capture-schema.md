@@ -129,9 +129,11 @@ changes between the two observations. Display names and hardware identifiers are
 not collected.
 `capture_policy.bitmap_dpi_context_requested` records the requested `per-monitor`
 or `window` or `application` capture context; `bitmap_dpi_awareness` records the resolved mode.
-Visible-screen copies always use physical per-monitor coordinates. Matching the
-window context can change PrintWindow's bitmap dimensions; `source_to_image`
-still maps physical screen coordinates to the actual PNG dimensions.
+`bitmap_coordinate_space` records `screen-pixels` or `window-context-pixels`
+(or `not_captured`). PrintWindow can paint at the window's native size inside a
+larger canvas; untouched padding outside that extent is removed. Painted pixels
+are retained. `source_to_image` maps physical screen coordinates to actual PNG
+dimensions. Visible-screen copies always use physical per-monitor coordinates.
 macOS and Linux currently retain node records under `native.nodes`, keyed by the
 same node IDs. `native_ref` identifies a node's native record. Native records are
 not unrestricted dumps: password content is never captured, and default policies

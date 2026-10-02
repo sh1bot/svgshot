@@ -1284,7 +1284,24 @@ std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
         throw std::runtime_error("Cannot read PNG memory stream");
     return png;
 }
-SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT selectedContext)
+// Crop only padding outside the expected window extent which the application
+// never touched. Alpha 127 is our initial marker, not a transparency estimate.
+// Painted white pixels (including zero-alpha GDI output) must be retained.
+SIZE printwindow_extent(const BYTE *pixels, SIZE canvas, SIZE native)
+{
+    if (native.cx <= 0 || native.cy <= 0 || native.cx > canvas.cx || native.cy > canvas.cy)
+        return canvas;
+    for (LONG y = 0; y < canvas.cy; ++y)
+        for (LONG x = y < native.cy ? native.cx : 0; x < canvas.cx; ++x)
+        {
+            auto p = pixels + (static_cast<size_t>(y) * canvas.cx + x) * 4;
+            if (p[0] != 255 || p[1] != 255 || p[2] != 255 || p[3] != 127)
+                return canvas;
+        }
+    return native;
+}
+SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT selectedContext,
+                         bool &windowPixels)
 {
     DWORD affinity = 0;
     if (GetWindowDisplayAffinity(hwnd, &affinity) && affinity != WDA_NONE)
@@ -1293,6 +1310,7 @@ SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT sele
     {
         HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         SIZE size{};
+        bool window_pixels = false;
         std::string png, error;
         ~Result() { if (done) CloseHandle(done); }
     };
@@ -1327,9 +1345,16 @@ SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT sele
         {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             initialized = true;
-            RECT r{};
+            RECT r{}, native{};
             if (!GetWindowRect(hwnd, &r))
                 throw std::runtime_error("Cannot read compatibility capture bounds");
+            {
+                // WM_PRINT may paint native-sized content into a physical-sized
+                // canvas. Measure both, without clipping before the app paints.
+                dpi_info::Context geometry(GetWindowDpiAwarenessContext(hwnd));
+                if (!geometry.previous || !GetWindowRect(hwnd, &native))
+                    throw std::runtime_error("Cannot read window-context compatibility bounds");
+            }
             LONG w = r.right - r.left, h = r.bottom - r.top;
             if (w <= 0 || h <= 0 || static_cast<uint64_t>(w) * h > 64 * 1024 * 1024)
                 throw std::runtime_error("Invalid compatibility capture dimensions");
@@ -1354,16 +1379,22 @@ SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT sele
             }
             auto data = static_cast<BYTE *>(pixels);
             std::fill_n(data, static_cast<size_t>(w) * h * 4, BYTE{255});
+            // GDI normally writes zero alpha. A distinct initial alpha lets us
+            // distinguish untouched canvas from genuinely painted white areas.
+            for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4) data[i] = 127;
             if (!PrintWindow(hwnd, surface.dc, 0))
                 throw std::runtime_error("PrintWindow failed (Windows error " +
                                          std::to_string(GetLastError()) + ")");
-            // GDI drawing does not initialize the alpha channel.
+            LONG nativeW = native.right-native.left, nativeH = native.bottom-native.top;
+            auto painted = printwindow_extent(data, {w, h}, {nativeW, nativeH});
+            result->window_pixels = painted.cx == nativeW && painted.cy == nativeH;
+            // GDI drawing does not consistently initialize the alpha channel.
             for (size_t i = 3; i < static_cast<size_t>(w) * h * 4; i += 4)
                 data[i] = 255;
             result->png = capture_step("Encode compatibility PNG", [&] {
-                return save_png(w, h, w * 4, data);
+                return save_png(painted.cx, painted.cy, w * 4, data);
             });
-            result->size = {w, h};
+            result->size = painted;
         }
         catch (const winrt::hresult_error &e) { result->error = hresult_message(e); }
         catch (const std::exception &e) { result->error = e.what(); }
@@ -1378,6 +1409,7 @@ SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT sele
     worker.join();
     if (!result->error.empty()) throw std::runtime_error(result->error);
     png = std::move(result->png);
+    windowPixels = result->window_pixels;
     return result->size;
 }
 void require_unobscured(HWND hwnd, RECT rectangle)
@@ -1464,11 +1496,12 @@ SIZE capture_screen(HWND hwnd, std::string &png)
     return {w, h};
 }
 SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility, bool &screenCapture,
-                 DPI_AWARENESS_CONTEXT selectedContext)
+                 DPI_AWARENESS_CONTEXT selectedContext, bool &windowPixels)
 {
+    windowPixels = false;
     if (screenCapture) return capture_screen(hwnd, png);
     if (compatibility)
-        return capture_printwindow(hwnd, png, selectedContext);
+        return capture_printwindow(hwnd, png, selectedContext, windowPixels);
     dpi_info::Context dpiContext(selectedContext);
     if (!dpiContext.previous) throw std::runtime_error("Cannot set WGC DPI context");
     if (!capture::GraphicsCaptureSession::IsSupported())
@@ -1697,6 +1730,20 @@ std::filesystem::path desktop_capture_path(HWND hwnd)
 }
 bool dpi_information_self_test()
 {
+    // Simulate a 150% canvas around native paint. Preserve painted white areas
+    // and isolated pixels; reject invalid extents instead of clipping content.
+    std::vector<BYTE> pixels(12 * 9 * 4, 255);
+    for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 127;
+    for (int y = 0; y < 6; ++y)
+        for (int x = 0; x < 8; ++x) pixels[(y * 12 + x) * 4 + 3] = 0;
+    auto extent = [&] { return printwindow_extent(pixels.data(), {12, 9}, {8, 6}); };
+    if (extent().cx != 8 || extent().cy != 6) return false;
+    pixels[(2 * 12 + 10) * 4 + 3] = 0; // Painted white is not padding.
+    if (extent().cx != 12 || extent().cy != 9) return false;
+    pixels[(2 * 12 + 10) * 4 + 3] = 127;
+    pixels[(8 * 12 + 2) * 4] = 0; // Preserve content below the native extent.
+    if (extent().cx != 12 || extent().cy != 9) return false;
+    if (printwindow_extent(pixels.data(), {12, 9}, {18, 13}).cx != 12) return false;
     using winrt::Windows::Data::Json::JsonObject;
     auto initial = GetThreadDpiAwarenessContext();
     for (auto mode : {DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -1913,6 +1960,7 @@ int wmain(int argc, wchar_t **argv)
         }
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
+        bool bitmapWindowPixels = false;
         auto selectedDpiContext = (uiaOnly || screenCapture) ? DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
                                                             : dpi_info::bitmap_context(hwnd, captureDpiContext);
         if (!selectedDpiContext)
@@ -1920,7 +1968,8 @@ int wmain(int argc, wchar_t **argv)
                                      std::to_string(GetLastError()) + ")");
         if (!uiaOnly)
             size = capture_step("Capture window bitmap", [&] {
-                return capture_png(hwnd, png, compatibility, screenCapture, selectedDpiContext);
+                return capture_png(hwnd, png, compatibility, screenCapture, selectedDpiContext,
+                                   bitmapWindowPixels);
             });
         RECT after = bounds(hwnd);
         std::string dpiAfter = dpi_info::read(hwnd);
@@ -2019,6 +2068,9 @@ int wmain(int argc, wchar_t **argv)
             << (uiaOnly ? "not_captured" : dpi_info::awareness(screenCapture
                     ? DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
                     : selectedDpiContext)) << '"'
+            << ",\"bitmap_coordinate_space\":\""
+            << (uiaOnly ? "not_captured" : bitmapWindowPixels
+                    ? "window-context-pixels" : "screen-pixels") << '"'
             << ",\"accessibility_api_selected\":" << json(snapshot->provider == "windows-msaa" ? L"msaa" : L"uia")
             << ",\"actions_invoked\":false,\"bitmap_method\":\""
             << (uiaOnly ? "none" : screenCapture ? "screen" : compatibility ? "printwindow" : "wgc")
