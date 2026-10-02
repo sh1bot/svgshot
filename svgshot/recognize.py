@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import difflib
 import io
 import json
@@ -17,6 +18,7 @@ from PIL import Image, ImageOps
 from scipy import ndimage
 
 from .model import Node
+from .artwork import photo_regions, trace_artwork
 
 
 @dataclass
@@ -1124,6 +1126,80 @@ def _structure(image: np.ndarray) -> list[Node]:
     return nodes
 
 
+def _table_text(source, texts, language):
+    """Read dense report tables by column; whole-page OCR often joins or skips rows.
+
+    Require aligned headers, visible column dividers, and repeated body rows.
+    This pixel-based pass works equally with and without accessibility metadata.
+    """
+    pixels = np.asarray(source.convert("RGB"))
+    height, width = pixels.shape[:2]
+    groups = []
+    for text in sorted(texts, key=lambda n: n.box[1]):
+        if not 2 <= len(text.text.strip()) <= 24 or text.box[3] > 40:
+            continue
+        center = text.box[1] + text.box[3]/2
+        group = next((g for g in groups if abs(center-g[0]) < 10), None)
+        if group is None:
+            groups.append([center, [text]])
+        else:
+            group[1].append(text)
+    for _, headers in groups:
+        headers.sort(key=lambda n: n.box[0])
+        if len(headers) < 4 or headers[-1].box[0]-headers[0].box[0] < width*.3:
+            continue
+        top = max(0, min(n.box[1] for n in headers)-10)
+        bottom = min(height, max(n.box[1]+n.box[3] for n in headers)+3)
+        strip = pixels[top:bottom]
+        gray = strip.mean(axis=2)
+        separators = np.flatnonzero(((gray > 205) & (gray < 248) &
+                                     (strip.max(axis=2)-strip.min(axis=2) < 12)).mean(axis=0) > .65)
+        cuts = [max(0, headers[0].box[0]-3)]
+        for left, right in zip(headers, headers[1:]):
+            choices = separators[(separators > left.box[0]+left.box[2]) & (separators < right.box[0])]
+            if not len(choices):
+                break
+            cuts.append(int(choices[-1]))
+        if len(cuts) != len(headers):
+            continue
+        last = headers[-1]
+        choices = separators[separators > last.box[0]+last.box[2]]
+        if not len(choices):
+            continue
+        cuts.append(int(choices[0]))
+        # A full-width frame marks the end of the scrollable body.
+        body = pixels[bottom:, cuts[0]:cuts[-1]].mean(axis=2)
+        lines = np.flatnonzero(((body > 45) & (body < 195)).mean(axis=1) > .7)
+        lines = lines[lines > 80]
+        end = bottom+int(lines[0]) if len(lines) else height
+        columns = []
+        for index, (left, right) in enumerate(zip(cuts, cuts[1:])):
+            left += 2
+            nodes = _ocr(source.crop((left, bottom, right-2, end)), language, psm=6)
+            if index == 0 and len(nodes) >= 6:
+                # Repeated row icons occupy a narrow strip before the labels.
+                inset = round(float(np.median([n.box[0] for n in nodes])))
+                if 8 <= inset <= 36:
+                    left += inset
+                    nodes = _ocr(source.crop((left, bottom, right-2, end)), language, psm=6)
+            typical_height = float(np.median([n.box[3] for n in nodes])) if nodes else 0
+            nodes = [n for n in nodes if n.box[3] >= typical_height*.6]
+            for node in nodes:
+                x, y, w, h = node.box
+                node.box = (left+x, bottom+y, w, h)
+                node.vector_data.update(source="ocr", role="table-cell", font_weight=400)
+                node.color = _hex(_pixel_color(pixels, node.box))
+            columns.append(nodes)
+        if sum(len(c) >= 6 for c in columns) < 2:
+            continue
+        # Record the inferred cells so semantic row bounds cannot consume neighbours.
+        for index, column in enumerate(columns):
+            for node in column:
+                node.vector_data["column_bounds"] = [cuts[index], bottom, cuts[index+1]-cuts[index], end-bottom]
+        return (cuts[0], bottom, cuts[-1]-cuts[0], end-bottom), [n for c in columns for n in c]
+    return None, []
+
+
 def reconstruct(image: Image.Image, options: Options) -> Node:
     if image.width * image.height > 25_000_000:
         raise ValueError("PNG exceeds the 25-megapixel limit")
@@ -1145,7 +1221,9 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
         structural.append(title_icon)
     if footer_surface:
         structural.insert(0,footer_surface)
+    photos = photo_regions(rgb_image)
     texts = _ocr(rgb_image, options.language) if options.ocr else []
+    primary_texts = copy.deepcopy(texts)
     focused,focused_text = _focused_controls(pixels,rgb_image,options.language,options.ocr)
     structural.extend(focused)
     shell,title = _window_shell(pixels,rgb_image,options.language,options.ocr)
@@ -1501,7 +1579,65 @@ def reconstruct(image: Image.Image, options: Options) -> Node:
                 local.color = _hex(_pixel_color(pixels, local.box))
                 if not any(_contains(t, local, 5) for t in texts):
                     texts.append(local)
-    root.children = ([decorative] if decorative else []) + structural + candidates + marks + controls
+    if options.ocr:
+        table_box, table_text = _table_text(rgb_image, texts, options.language)
+        if table_box:
+            table = Node("rect", table_box, color=_hex(_background(pixels[
+                table_box[1]:table_box[1]+table_box[3], table_box[0]:table_box[0]+table_box[2]])))
+            texts = [n for n in texts if not (
+                max(0, min(n.box[0]+n.box[2], table_box[0]+table_box[2])-max(n.box[0], table_box[0])) *
+                max(0, min(n.box[1]+n.box[3], table_box[1]+table_box[3])-max(n.box[1], table_box[1])) >
+                n.box[2]*n.box[3]*.3)] + table_text
+            candidates = [n for n in candidates if not _contains(table, n, 3)]
+            structural.append(table)
+    # Control heuristics can mistake large headline strokes for an edit border.
+    # Retain a confident full-page reading when a local retry lost its prefix.
+    restored = []
+    def shared_area(a, b):
+        x,y,w,h = a.box; q,r,s,t = b.box
+        return max(0,min(x+w,q+s)-max(x,q))*max(0,min(y+h,r+t)-max(y,r))
+    for original in primary_texts:
+        if original.confidence < .85 or original.box[3] < 28:
+            continue
+        broken = [n for n in texts if shared_area(n,original) > min(n.box[2]*n.box[3],original.box[2]*original.box[3])*.6
+                  and len(n.text) < len(original.text)*.9
+                  and difflib.SequenceMatcher(None,n.text.casefold(),original.text.casefold()).ratio() > .65]
+        if broken:
+            texts = [n for n in texts if n not in broken]
+            original.color = _hex(_pixel_color(pixels,original.box))
+            texts.append(original)
+            restored.append(original)
+    candidates = [n for n in candidates if not any(shared_area(n,t) > n.box[2]*n.box[3]*.4 for t in restored)]
+    structural = [n for n in structural if not any(shared_area(n,t) > n.box[2]*n.box[3]*.4 for t in restored)]
+    controls = [n for n in controls if not any(shared_area(n,t) > n.box[2]*n.box[3]*.4 for t in restored)]
+    # A second OCR pass may return a whole menu row already represented by
+    # separate captions. Keep those local boxes, rather than stretching a line.
+    duplicates = set()
+    for n in texts:
+        contained = [t for t in texts if t is not n and t.box[2] < n.box[2]*.8 and _contains(n,t,4)]
+        if len(contained) >= 2:
+            joined = ' '.join(t.text for t in sorted(contained,key=lambda t:t.box[0]))
+            if difflib.SequenceMatcher(None,joined.casefold(),n.text.casefold()).ratio() > .8:
+                duplicates.add(id(n))
+    texts = [n for n in texts if id(n) not in duplicates]
+    pictures = [trace_artwork(rgb_image, box, opaque=True) for box in photos]
+    if pictures:
+        texts = [n for n in texts if not any(_contains(p, n, 3) for p in pictures)]
+        candidates = [n for n in candidates if not any(_contains(p, n, 3) for p in pictures)]
+        structural = [n for n in structural if not any(_contains(p, n, 3) for p in pictures)]
+    # Dense dark panels containing several text lines are surfaces, not ink.
+    labels, _ = ndimage.label(pixels.max(axis=2) < 65)
+    for label, slices in enumerate(ndimage.find_objects(labels), 1):
+        if slices is None:
+            continue
+        ys,xs = slices
+        pw,ph = xs.stop-xs.start, ys.stop-ys.start
+        if not (200 <= pw < w*.8 and 70 <= ph < h*.6):
+            continue
+        panel = Node("rect", (xs.start,ys.start,pw,ph), color=_hex(np.median(pixels[ys,xs].reshape(-1,3),axis=0)))
+        if (labels[ys,xs] == label).mean() > .7 and sum(_contains(panel,t,2) for t in texts) >= 3:
+            structural.append(panel)
+    root.children = ([decorative] if decorative else []) + structural + candidates + marks + controls + pictures
     for text in texts:
         if any(_contains(button,text,2) for button in disabled):
             text.vector_data["role"]="disabled-text"

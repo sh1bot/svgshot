@@ -75,6 +75,9 @@ if len(sys.argv)>1:
         if api != 'auto':
             assert selected_snapshot['source']['provider'] == 'windows-' + api
         if api == 'msaa':
+            raw_nodes = list(walk(selected_snapshot['native']['snapshot']['root']))
+            assert all('raw_bounds' in n and 'bounds_normalized' in n for n in raw_nodes)
+            assert all(not n['bounds_normalized'] or len(n['raw_bounds']) == 4 for n in raw_nodes)
             assert not any('tree truncated' in warning for warning in selected_snapshot['warnings']), \
                 'MSAA traversal repeated children until the node limit'
             assert any(n.get('label') == 'Accessible service row' and n['role'] == 'listitem'

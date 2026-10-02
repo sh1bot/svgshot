@@ -26,6 +26,29 @@ from svgshot.validate import (add_fidelity_regions, compare, ground_truth,
 
 
 class PipelineTest(unittest.TestCase):
+    def test_report_table_is_read_as_separate_columns(self):
+        from svgshot.recognize import _table_text
+        image = Image.new('RGB',(760,300),'white')
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.truetype('DejaVuSans.ttf',16)
+        positions = [20,230,410,560]
+        headers = ['Name','Description','Status','Account']
+        nodes = []
+        for x,label in zip(positions,headers):
+            draw.text((x,20),label,font=font,fill='black')
+            nodes.append(Node('text',(x,23,round(font.getlength(label)),16),text=label))
+        for x in [220,400,550,710]:
+            draw.line((x,10,x,42),fill='#eeeeee')
+        for row in range(8):
+            for x,label in zip(positions,['Service '+str(row),'Example','Running','Local']):
+                draw.text((x,55+row*26),label,font=font,fill='black')
+        draw.line((10,270,720,270),fill='#777777')
+        box,texts = _table_text(image,nodes,'eng')
+        self.assertIsNotNone(box)
+        self.assertGreaterEqual(sum(t.text == 'Running' for t in texts),7)
+        self.assertTrue(all(t.box[2] < 210 for t in texts))
+        self.assertTrue(all(t.vector_data['role'] == 'table-cell' for t in texts))
+
     def test_partial_border_at_capture_edge_is_not_a_panel(self):
         clipped = Node("outline", (182, 574, 577, 68))
         complete = Node("outline", (100, 100, 200, 80))

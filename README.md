@@ -98,7 +98,7 @@ captures do not preserve interaction or live announcements.
 
 Complex layouts, small text and custom artwork may be simplified or missed.
 Unrecognized image details may remain as PNG regions. Use `--no-raster` to omit
-them, or `--allow-raster` to retain additional image detail in semantic output.
+them. `--allow-raster` enables them when disabled by a configuration file.
 Inspect the SVG at its intended size before relying on it.
 
 ## Capture data

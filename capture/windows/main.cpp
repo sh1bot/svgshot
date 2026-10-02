@@ -768,11 +768,14 @@ int msaa_control_type(const VARIANT &role)
     }
 }
 
+#include "msaa_geometry.h"
+
 std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport,
                            bool include_hidden, bool debug_unredacted, int depth,
                            int &count, bool &truncated, bool enumerate_children,
                            std::set<IUnknown *> &visited,
-                           std::vector<com_ptr<IUnknown>> &identity_refs)
+                           std::vector<com_ptr<IUnknown>> &identity_refs,
+                           MsaaGeometry geometry = {})
 {
     if (enumerate_children)
     {
@@ -798,9 +801,23 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
     HRESULT state_hr = accessible->get_accState(child, &state);
     LONG x = 0, y = 0, w = 0, h = 0;
     HRESULT bounds_hr = accessible->accLocation(&x, &y, &w, &h, child);
-    RECT box{x, y, x + std::max<LONG>(0, w), y + std::max<LONG>(0, h)}, intersection{};
+    RECT rawBox{x, y, x + std::max<LONG>(0, w), y + std::max<LONG>(0, h)};
+    if (enumerate_children && SUCCEEDED(bounds_hr))
+        geometry = msaa_geometry(accessible, rawBox, geometry);
+    auto elementGeometry = geometry;
+    if (!enumerate_children && role.vt == VT_I4 && role.lVal == ROLE_SYSTEM_LISTITEM &&
+        (geometry.rowScaleX != 1 || geometry.rowScaleY != 1))
+    {
+        elementGeometry.scaleX = geometry.rowScaleX;
+        elementGeometry.scaleY = geometry.rowScaleY;
+        elementGeometry.dx = geometry.rowOrigin.x*(1-geometry.rowScaleX);
+        elementGeometry.dy = geometry.rowOrigin.y*(1-geometry.rowScaleY);
+        elementGeometry.corrected = true;
+    }
+    RECT box = elementGeometry.apply(rawBox), intersection{};
     bool offscreen = FAILED(bounds_hr) || w <= 0 || h <= 0 ||
-                     !IntersectRect(&intersection, &box, &viewport);
+                     !IntersectRect(&intersection, &box, &viewport) ||
+                     (state.vt == VT_I4 && (state.lVal & (STATE_SYSTEM_INVISIBLE | STATE_SYSTEM_OFFSCREEN)));
     bool protected_content = role_hr == S_OK && role.vt == VT_I4 &&
                              role.lVal == ROLE_SYSTEM_TEXT && state_hr == S_OK &&
                              state.vt == VT_I4 && (state.lVal & STATE_SYSTEM_PROTECTED);
@@ -819,7 +836,8 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
     std::string id = "msaa-" + std::to_string(count);
     std::string result = "{\"id\":" + json(std::wstring(id.begin(), id.end())) +
         ",\"control_type\":" + std::to_string(role_hr == S_OK ? msaa_control_type(role) : UIA_CustomControlTypeId) +
-        ",\"bounds\":" + rect_json(box) + ",\"name\":" + json(redact ? L"" : name_text) +
+        ",\"bounds\":" + rect_json(box) + ",\"raw_bounds\":" + rect_json(rawBox) +
+        ",\"bounds_normalized\":" + (elementGeometry.corrected ? "true" : "false") + ",\"name\":" + json(redact ? L"" : name_text) +
         ",\"localized_control_type\":" + json(role_text) + ",\"class_name\":\"IAccessible\",\"framework_id\":\"MSAA\"" +
         ",\"enabled\":" + std::string(state.vt == VT_I4 && !(state.lVal & STATE_SYSTEM_UNAVAILABLE) ? "true" : "false") +
         ",\"offscreen\":" + (offscreen ? "true" : "false") +
@@ -864,7 +882,7 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
                         VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
                         child_json = read_msaa_node(child_accessible.get(), self, viewport, include_hidden,
                                                     debug_unredacted, depth + 1, count, truncated,
-                                                    true, visited, identity_refs);
+                                                    true, visited, identity_refs, geometry);
                     }
                 }
                 else if (children[i].vt == VT_I4)
@@ -879,12 +897,12 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
                         VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
                         child_json = read_msaa_node(child_accessible.get(), self, viewport, include_hidden,
                                                     debug_unredacted, depth + 1, count, truncated,
-                                                    true, visited, identity_refs);
+                                                    true, visited, identity_refs, geometry);
                     }
                     else
                         child_json = read_msaa_node(accessible, children[i], viewport, include_hidden,
                                                     debug_unredacted, depth + 1, count, truncated,
-                                                    false, visited, identity_refs);
+                                                    false, visited, identity_refs, geometry);
                 }
                 if (!child_json.empty() && child_json != "null")
                 {
@@ -1568,6 +1586,8 @@ std::filesystem::path desktop_capture_path(HWND hwnd)
 }
 int wmain(int argc, wchar_t **argv)
 {
+    if (argc == 2 && std::wstring(argv[1]) == L"--geometry-self-test")
+        return msaa_geometry_self_test() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--version")
     {
         std::cout << "svgshot-capture-win " << SVGSHOT_COMMIT << "\n";

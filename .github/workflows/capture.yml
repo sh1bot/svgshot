@@ -21,6 +21,8 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
+          & build/capture/Release/svgshot-capture-win.exe --geometry-self-test
+          if ($LASTEXITCODE -ne 0) { throw '150% DPI geometry regression' }
           $fixture = Start-Process build/capture/Release/svgshot-capture-win.exe -ArgumentList '--fixture' -PassThru
           try {
             for ($i = 0; $i -lt 40; $i++) {

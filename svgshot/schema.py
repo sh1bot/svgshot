@@ -74,5 +74,9 @@ def render_view(snapshot):
                 'text_ranges': [line(t) for t in n.get('text', {}).get('lines', [])],
                 'debug_unredacted': debug_unredacted,
                 **n.get('shortcuts', {}), 'children': [node(c) for c in n.get('children', [])]}
-    return {'_renderer_view': True, 'image_size': size, 'screen_bounds': [0, 0, *size], 'root': node(snapshot['root']),
+    root = node(snapshot['root'])
+    if snapshot.get('source', {}).get('provider') == 'windows-msaa':
+        from .geometry import normalize_msaa
+        root = normalize_msaa(root)
+    return {'_renderer_view': True, 'image_size': size, 'screen_bounds': [0, 0, *size], 'root': root,
             'warnings': snapshot.get('warnings', [])}

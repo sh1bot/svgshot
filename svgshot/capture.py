@@ -1,29 +1,21 @@
-"""Separate UIA-assisted capture/replay CLI; imports the existing vectorizer.
-
-The Windows SDK helper supplies physical screen coordinates and a WGC PNG.
-Replay and SVG generation work on any platform without Windows dependencies.
-"""
+"""Merge platform-neutral accessibility observations into a visual reconstruction."""
 from __future__ import annotations
 
 import argparse
 import json
 import re
 import math
-import os
-import shutil
-import subprocess
 import sys
 import unicodedata
 from html import escape
-from pathlib import Path
 
 from PIL import Image
 
 from .model import Node, flatten
-from .recognize import Options, reconstruct, _ocr_ui
+from .artwork import trace_artwork
+from .recognize import _ocr_ui
 from .svg import to_svg, _font
-from .snapshot import read_snapshot
-from .schema import render_view, validate as validate_schema
+from .schema import render_view
 
 TYPES = dict(enumerate((
     "button", "calendar", "checkbox", "combobox", "edit", "hyperlink", "image",
@@ -85,13 +77,18 @@ def overlap(a, b):
     return max(0, min(x+w, q+s)-max(x, q))*max(0, min(y+h, r+t)-max(y, r))
 
 
-def visible_items(root, snapshot):
+def visible_items(root, snapshot, viewport=None):
     if not isinstance(root, dict) or root.get("offscreen"):
         return
-    if local_box(root.get("bounds", []), snapshot):
+    box = local_box(root.get("bounds", []), snapshot)
+    if box and (viewport is None or overlap(box, viewport) > 0):
         yield root
+    elif box and viewport:
+        return
+    if box and kind(root) in {"list", "tree", "table", "datagrid"}:
+        viewport = box
     for child in root.get("children", []):
-        yield from visible_items(child, snapshot)
+        yield from visible_items(child, snapshot, viewport)
 
 
 def sample_color(image, box):
@@ -125,57 +122,6 @@ def exposed_by_descendant(item, text):
 def icon_text(text):
     return bool(text.strip()) and all(unicodedata.category(c) == "Co" or c.isspace() for c in text)
 
-
-def trace_artwork(image, box):
-    """Simplify screenshot ink into flat vector contours, without font dependence."""
-    import numpy as np
-    x, y, w, h = box
-    patch = image.crop((x, y, x+w, y+h)).convert("RGB")
-    patch.thumbnail((256, 256))
-    scale_x, scale_y = w/patch.width, h/patch.height
-    w, h = patch.size
-    pixels = np.asarray(patch)
-    background = np.median(np.concatenate((pixels[0], pixels[-1], pixels[:, 0], pixels[:, -1])), axis=0)
-    foreground = np.max(np.abs(pixels.astype(float)-background), axis=2) > 35
-    # Fixed palette bins keep tracing deterministic and remove antialias texture.
-    colors = np.minimum((pixels.astype("uint16")//48)*48+24, 255)
-    paths = []
-    for color in np.unique(colors[foreground], axis=0):
-        mask = (foreground & np.all(colors == color, axis=2)).astype('uint8')
-        # Trace pixel boundaries; omit collinear vertices to keep paths compact.
-        edges = {}
-        for row, column in np.argwhere(mask):
-            a, b = int(column), int(row)
-            for start, end, outside in (
-                ((a,b),(a+1,b), b == 0 or not mask[b-1,a]),
-                ((a+1,b),(a+1,b+1), a == w-1 or not mask[b,a+1]),
-                ((a+1,b+1),(a,b+1), b == h-1 or not mask[b+1,a]),
-                ((a,b+1),(a,b), a == 0 or not mask[b,a-1]),
-            ):
-                if outside:
-                    edges.setdefault(start, []).append(end)
-        segments = []
-        while edges:
-            start = next(iter(edges))
-            points, current = [start], start
-            while current in edges:
-                following = edges[current].pop()
-                if not edges[current]:
-                    del edges[current]
-                current = following
-                if current == start:
-                    break
-                points.append(current)
-            if current != start or len(points) < 4:
-                continue
-            simple = [point for i, point in enumerate(points)
-                      if (point[0]-points[i-1][0], point[1]-points[i-1][1]) !=
-                         (points[(i+1)%len(points)][0]-point[0], points[(i+1)%len(points)][1]-point[1])]
-            if len(simple) >= 3:
-                segments.append("M"+" L".join(f"{x+a*scale_x:g} {y+b*scale_y:g}" for a, b in simple)+" Z")
-        if segments:
-            paths.append({"d": " ".join(segments), "fill": "#%02x%02x%02x" % tuple(color)})
-    return Node("capture-artwork", box, vector_data={"paths": paths})
 
 
 def ink_box(image, box):
@@ -259,7 +205,7 @@ def terminal_text(image, item, snapshot):
     return nodes
 
 
-def merge_uia(scene, image, snapshot, language="eng"):
+def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
     Keep semantic names separate from visible captions: image and container
@@ -280,7 +226,9 @@ def merge_uia(scene, image, snapshot, language="eng"):
                      or kind(n) == "edit" and n.get("framework_id") == "XAML"]
     surfaces = []
     for item in items:
-        if id(item) in terminals or kind(item) in {"pane", "list", "tree", "appbar", "tab", "tabitem", "header", "statusbar"}:
+        if (id(item) in terminals or kind(item) in {"list", "tree", "appbar", "tab", "tabitem", "header", "statusbar"}
+                or kind(item) == "pane" and local_box(item["bounds"], snapshot)[3] < 150
+                and local_box(item["bounds"], snapshot)[2] > image.width*.5):
             b = local_box(item["bounds"], snapshot)
             if b[2]*b[3] > 4000:
                 surfaces.append(Node("rect", b, color=sample_color(image, b)))
@@ -289,6 +237,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
         if top > 0:
             header = (0, 0, image.width, top)
             surfaces.append(Node("rect", header, color=sample_color(image, header)))
+    surfaces = list({(n.box, n.color): n for n in surfaces}.values())
     surfaces.sort(key=lambda n: n.box[2]*n.box[3], reverse=True)
     cells = {id(child) for item in items if kind(item) in {"listitem", "dataitem"}
              for child in walk(item) if kind(child) == "edit"}
@@ -306,12 +255,38 @@ def merge_uia(scene, image, snapshot, language="eng"):
             text_boxes.append(box)
             suppressed.update(id(n) for n in ocr if overlap(n.box, box) > n.box[2]*n.box[3]*.35)
             return
-        text_boxes.append(box)
+        if id(owner) in cells:
+            x,y,w,h = box
+            for item in items:
+                if kind(item) == "scrollbar":
+                    scroll = local_box(item["bounds"], snapshot)
+                    if scroll and scroll[2] >= scroll[3] and overlap(box,scroll) > w*h*.5:
+                        return
+                    if scroll and scroll[2] < scroll[3] and overlap(box,scroll):
+                        w = min(w, max(1,scroll[0]-x))
+            box = (x,y,w,h)
         matches = [n for n in ocr if id(n) not in suppressed and
                    overlap(box, n.box) > min(n.box[2]*n.box[3], box[2]*box[3])*.35]
         exact = [n for n in matches if normalize(n.text) == normalize(text)]
+        if owner.get("framework_id") == "MSAA" or (owner.get("framework_id") == "Chrome" and kind(owner) in {"listitem", "tabitem"}):
+            # Accessible names can be complete while the painted cell is clipped.
+            # Never use a row-wide rectangle to erase the other table columns.
+            from difflib import SequenceMatcher
+            def matches_name(node):
+                a, b = normalize(node.text), normalize(text)
+                prefix = a.rstrip(". ")
+                return a == b or (a.endswith("...") and len(prefix) >= 6 and b.startswith(prefix)) or (
+                    len(a) >= 6 and SequenceMatcher(None, a, b).ratio() >= .92)
+            candidates = [n for n in ocr if id(n) not in suppressed and matches_name(n)]
+            if candidates:
+                chosen = min(candidates, key=lambda n: abs(n.box[1]-box[1])+abs(n.box[0]-box[0]))
+                matches = exact = [chosen]
+                if normalize(chosen.text).endswith("..."):
+                    text = text[:len(chosen.text.rstrip(". "))].rstrip()+"…"
+            elif kind(owner) in {"listitem", "menuitem", "headeritem", "treeitem", "tabitem"}:
+                return  # Unverified geometry must not create captions over other ink.
         placement = exact
-        ink = ink_box(image, box) if kind(owner) == "text" or id(owner) in cells or kind(owner) == "treeitem" else None
+        ink = ink_box(image, box) if owner.get("framework_id") != "MSAA" and (kind(owner) == "text" or id(owner) in cells or kind(owner) == "treeitem") else None
         if not ink and placement:
             ink = max(placement, key=lambda n: overlap(n.box, box)).box
         if not ink:
@@ -319,17 +294,24 @@ def merge_uia(scene, image, snapshot, language="eng"):
             height = min(14, max(7, h-4))
             width = min(max(1, w-8), max(8, round(len(text)*height*.52)))
             ink = (x+(w-width)//2 if centered else x, y+(h-height)//2, width, height)
+        layout = {}
         # A TextBlock can expose its full name even when the visible label clips.
         # Use an ellipsis in the visual layer; the semantic tree keeps the full name.
-        if kind(owner) == "text" and owner.get("framework_id") == "XAML":
+        if (kind(owner) == "text" and owner.get("framework_id") == "XAML") or id(owner) in cells and len(text) > 20:
             font = _font("auto")
             if font:
                 _, top, _, bottom = font.getbbox(text, anchor="ls")
                 size = ink[3]*100/max(1, bottom-top)
                 if font.getlength(text)*size/100 > ink[2]*1.2:
+                    layout = {"font_size": size, "baseline": ink[1]-top*size/100}
                     while text and font.getlength(text+"…")*size/100 > ink[2]:
                         text = text[:-1]
                     text += "…"
+        if ink[3] < 5:
+            return
+        text_boxes.append(ink)
+        suppressed.update(id(n) for n in ocr if contains(n.box, ink) and
+                          normalize(text) in normalize(n.text))
         signature = (text, ink)
         if signature in emitted:
             return
@@ -344,7 +326,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
                 return
         emitted.add(signature)
         node = Node("text", ink, text=text, color="#171717",
-                    vector_data={"source": "uia", "uia_id": owner.get("id", ""), "font_weight": 400})
+                    vector_data={"source": "uia", "uia_id": owner.get("id", ""), "font_weight": 400, **layout})
         text_nodes.append(node)
 
     for item in items:
@@ -371,7 +353,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
                   or not item.get("framework_id"))
         if (not titlebar_button and
                 ((role in {"button", "splitbutton", "checkbox", "radiobutton"} and native)
-                or role == "edit" and id(item) not in cells
+                or role == "edit" and id(item) not in cells and item.get("framework_id") != "MSAA"
                 or role == "combobox" or role == "tabitem" and native)):
             x, y, w, h = box
             shape = {"button": "outlined-button", "splitbutton": "outlined-button", "edit": "outline",
@@ -435,6 +417,8 @@ def merge_uia(scene, image, snapshot, language="eng"):
         elif role == "splitbutton" and name:
             if not any(kind(n) == "text" for n in walk(item) if n is not item) and any(normalize(n.text) == normalize(name) for n in ocr if contains(box, n.box)):
                 emit(name, box, item)
+        elif role == "edit" and item.get("framework_id") == "MSAA" and name and not item.get("states", {}).get("value"):
+            emit(name, box, item)
         elif role == "edit" and item.get("states", {}).get("value"):
             x, y, w, h = box
             # A multiline edit should expose TextPattern; avoid squeezing its
@@ -449,7 +433,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
             x, y, w, h = box
             source_nodes = [n for n in ocr if overlap(n.box, box) > n.box[2]*n.box[3]*.12]
             left, top, right, bottom = x+3, y+1, x+w-4, y+h-1
-            if source_nodes and right > left and bottom > top:
+            if ocr_enabled and source_nodes and right > left and bottom > top:
                 candidates = [n for n in _ocr_ui(image.crop((left, top, right, bottom)),
                                                     language, psm=7)
                               if n.confidence >= .65 and any(ch.isalnum() for ch in n.text)]
@@ -466,8 +450,12 @@ def merge_uia(scene, image, snapshot, language="eng"):
                     suppressed.update(id(n) for n in source_nodes
                                       if overlap(n.box, box) > n.box[2]*n.box[3]*.30)
 
+    for n in ocr:
+        represented = [t for t in text_nodes if overlap(n.box,t.box) and normalize(t.text) in normalize(n.text)]
+        if len(represented) >= 2 and sum(len(t.text) for t in represented) > len(n.text)*.5:
+            suppressed.add(id(n))
     suppressed.update(id(n) for n in ocr if any(
-        kind(item) == "scrollbar" and contains(local_box(item["bounds"], snapshot), n.box)
+        kind(item) == "scrollbar" and overlap(local_box(item["bounds"], snapshot), n.box) > n.box[2]*n.box[3]*.35
         for item in items))
     suppressed.update(id(n) for n in ocr if any(overlap(n.box, a.box) > n.box[2]*n.box[3]*.35 for a in artwork))
     for n in ocr:
@@ -560,10 +548,6 @@ def semantic_svg(scene, snapshot, font_family="auto"):
              '<desc id="capture-description">Static window capture. Represented controls are informational and cannot be operated.</desc>',
              '<metadata id="uia-snapshot">'+escape(json.dumps(original, ensure_ascii=False))+'</metadata>',
              '<g aria-hidden="true" data-kind="visual-reconstruction">', body.rsplit("</svg>", 1)[0]]
-    for node in flatten(scene):
-        if node.kind == "capture-artwork":
-            for path in node.vector_data["paths"]:
-                parts.append(f'<path data-kind="capture-artwork" d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"/>')
     parts.append('</g>')
     serial = 0
 
@@ -626,102 +610,13 @@ def accessible_html(svg, snapshot):
             +outline(snapshot["root"])+"</ul></html>\n")
 
 
-def native_helper(explicit):
-    if explicit:
-        return str(explicit.resolve())
-    env = os.environ.get("SVGSHOT_CAPTURE_HELPER")
-    if env:
-        return env
-    executable = shutil.which("svgshot-capture-win")
-    if executable:
-        return executable
-    checkout = Path(__file__).resolve().parents[1]
-    for path in (checkout/"build/capture/Release/svgshot-capture-win.exe", checkout/"build/capture/svgshot-capture-win.exe"):
-        if path.is_file():
-            return str(path)
-    raise RuntimeError("Build capture/windows with CMake, or set SVGSHOT_CAPTURE_HELPER to svgshot-capture-win.exe")
-
-
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Render a semantic PNG capture as SVG, or capture a Windows window")
-    parser.add_argument("output", type=Path)
-    parser.add_argument("--image", type=Path, help="Render a PNG with an embedded semantic snapshot")
-    parser.add_argument("--helper", type=Path, help="Native Windows helper executable")
-    parser.add_argument("--hwnd", help="Capture a specific window handle (decimal or 0x hexadecimal)")
-    parser.add_argument("--foreground", action="store_true", help="Capture the foreground window after --delay")
-    parser.add_argument("--delay", type=int, default=0)
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--no-ocr", action="store_true")
-    parser.add_argument("--include-hidden-content", action="store_true", help="Opt in to offscreen UIA content and full values; may include private data")
-    parser.add_argument("--debug-unredacted", action="store_true",
-                        help="Debug only: include content normally redacted, including passwords; may capture sensitive information")
-    parser.add_argument("--accessibility-api", choices=("auto", "uia", "msaa"), default="auto",
-                        help="Windows accessibility source (default: choose the richer UIA/MSAA tree)")
-    parser.add_argument("--allow-raster", action="store_true", help="Opt in to the existing small-raster fallback")
-    parser.add_argument("--scene", type=Path)
-    parser.add_argument("--html", type=Path, help="Accessible HTML preview with inline SVG and a text outline")
-    args = parser.parse_args(argv)
-    try:
-        if args.output.suffix.lower() != ".svg":
-            raise ValueError("Output must have an .svg extension")
-        if not 0 <= args.delay <= 60 or (args.hwnd and args.foreground):
-            raise ValueError("Delay must be 0–60; choose --hwnd or --foreground")
-        if args.image and (args.hwnd or args.foreground or args.delay or args.helper or args.include_hidden_content
-                           or args.debug_unredacted or args.accessibility_api != "auto"):
-            raise ValueError("Window selection options do not apply to replay")
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        if args.image:
-            image_path = args.image
-        else:
-            if sys.platform != "win32":
-                raise RuntimeError("Live capture requires Windows; use --image to render a stored PNG")
-            prefix = args.output.with_suffix("")
-            image_path = Path(str(prefix)+".png")
-            command = [native_helper(args.helper), "--out", str(image_path.resolve())]
-            if args.include_hidden_content:
-                command += ["--include-hidden-content"]
-            if args.debug_unredacted:
-                command += ["--debug-unredacted"]
-            if args.accessibility_api != "auto":
-                command += ["--accessibility-api", args.accessibility_api]
-            if args.hwnd:
-                command += ["--hwnd", args.hwnd]
-            if args.foreground:
-                command += ["--foreground"]
-            if args.delay:
-                command += ["--delay", str(args.delay)]
-            result = subprocess.run(command, check=False)
-            if result.returncode:
-                return result.returncode
-        outputs = [args.output, args.scene, args.html]
-        inputs = {image_path.resolve()}
-        if any(p and p.resolve() in inputs for p in outputs):
-            raise ValueError("Output paths must not overwrite capture inputs")
-        if len({p.resolve() for p in outputs if p}) != sum(p is not None for p in outputs):
-            raise ValueError("Output, scene, and HTML paths must differ")
-        snapshot = read_snapshot(image_path)
-        validate_schema(snapshot)
-        with Image.open(image_path) as image:
-            image.load()
-            validate_snapshot(snapshot, image)
-            options = Options.from_file(str(args.config) if args.config else None)
-            options.raster_fallback = args.allow_raster
-            options.fidelity_fallback = False
-            if args.no_ocr:
-                options.ocr = False
-            scene = merge_uia(reconstruct(image, options), image, snapshot, options.language)
-            svg = semantic_svg(scene, snapshot, options.font_family)
-            args.output.write_text(svg, encoding="utf-8")
-            if args.scene:
-                args.scene.write_text(json.dumps(scene.to_dict(), indent=2)+"\n", encoding="utf-8")
-            if args.html:
-                args.html.write_text(accessible_html(svg, snapshot), encoding="utf-8")
-        for warning in snapshot.get("warnings", []):
-            print("svgshot capture: "+warning, file=sys.stderr)
-        return 0
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
-        print(f"svgshot capture: {error}", file=sys.stderr)
-        return 1
+    """Compatibility entry point; all conversion and capture now use the main CLI."""
+    from .cli import main as convert
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--image")
+    old, remaining = parser.parse_known_args(sys.argv[1:] if argv is None else argv)
+    return convert(([old.image] if old.image else ["--capture"])+remaining)
 
 
 if __name__ == "__main__":

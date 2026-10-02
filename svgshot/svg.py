@@ -65,7 +65,7 @@ def text_layout(node: Node, font_family: str = "auto") -> tuple[float, float]:
     left, top, right, bottom = font.getbbox(node.text, anchor="ls")
     ink_height = max(1, bottom-top)
     ink_width = max(1, font.getlength(node.text))
-    size = max(6, min(40, 100 * min(width/ink_width, height/ink_height)))
+    size = max(6, 100 * min(width/ink_width, height/ink_height))
     baseline = y - top * size/100
     return round(size, 2), round(baseline, 2)
 
@@ -118,6 +118,10 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             if data.get("wave_path"):
                 parts.append(f'<path d="{data["wave_path"]}" fill="{data["wave_color"]}"/>')
             parts.append('</g>')
+        elif kind == "capture-artwork":
+            for path in node.vector_data["paths"]:
+                stroke = f' stroke="{path["fill"]}" stroke-width="0.5"' if node.vector_data.get("opaque") else ""
+                parts.append(f'<path data-kind="capture-artwork" shape-rendering="crispEdges" d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"{stroke}/>')
         elif kind == "text":
             if node.vector_data.get("role") not in ("selected-text","disabled-text"):
                 paint = _contrast(paint, surface_at(node, surface),

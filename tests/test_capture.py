@@ -48,6 +48,19 @@ def semantic_snapshot():
 
 
 class CaptureTests(unittest.TestCase):
+    def test_msaa_row_does_not_erase_other_columns_or_invent_offscreen_names(self):
+        s = snapshot()
+        s['root']['children'] = [element(50007, 'Known service', [120,225,250,25], framework_id='MSAA'),
+                                  element(50007, 'Hidden row', [120,250,250,25], framework_id='MSAA')]
+        scene = Node('root', (0,0,300,180), children=[
+            Node('text', (25,30,95,14), text='Known service'),
+            Node('text', (170,30,65,14), text='Running')])
+        merge_uia(scene, Image.new('RGB',(300,180),'white'), s)
+        texts = [n.text for n in flatten(scene) if n.kind == 'text']
+        self.assertEqual(texts.count('Known service'), 1)
+        self.assertIn('Running', texts)
+        self.assertNotIn('Hidden row', texts)
+
     def test_coordinate_origin_scaling_and_clipping(self):
         s = snapshot()
         self.assertEqual(local_box([120, 225, 90, 30], s), (20, 25, 90, 30))

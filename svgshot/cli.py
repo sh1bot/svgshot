@@ -28,7 +28,7 @@ def _parser():
                         help="capture a window directly instead of reading an input PNG")
     parser.add_argument("--html", type=Path, help="Write an accessible HTML outline (semantic PNGs)")
     parser.add_argument("--allow-raster", action="store_true",
-                        help="Keep extra raster details in semantic output")
+                        help="Keep small unrecognized raster details")
     parser.add_argument("--config", type=Path, help="JSON recognition options")
     parser.add_argument("--scene", type=Path, help="Save the recognized scene graph as JSON")
     parser.add_argument("--diagnostic", type=Path,
@@ -56,10 +56,13 @@ def _has_capture_options(args):
                 args.accessibility_api != "auto", args.bitmap, args.window_bounds))
 
 
-def _raw_convert(data, input_path, output, args):
-    if args.html:
+def _convert(data, snapshot, output, args):
+    """One recognition/export pipeline; metadata adds semantics and corrections."""
+    if args.html and snapshot is None:
         raise ValueError("--html requires a PNG with embedded semantic data")
     options = Options.from_file(str(args.config) if args.config else None)
+    if args.allow_raster:
+        options.raster_fallback = True
     if args.no_ocr:
         options.ocr = False
     if args.no_raster:
@@ -73,68 +76,47 @@ def _raw_convert(data, input_path, output, args):
     if args.font_family:
         options.font_family = args.font_family
 
+    def write(path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
     with Image.open(io.BytesIO(data)) as source:
         source.load()
+        if snapshot is not None:
+            validate_snapshot(snapshot, source)
         scene = reconstruct(source, options)
-        svg = to_svg(scene, options.font_family)
+        if snapshot is not None:
+            scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
+        def serialize():
+            return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None
+                    else to_svg(scene, options.font_family))
+        svg = serialize()
         fidelity = None
         if options.raster_fallback and options.fidelity_fallback:
             fidelity = add_fidelity_regions(source, scene, svg, options.font_family)
             if fidelity and fidelity["regions"]:
-                svg = to_svg(scene, options.font_family)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(svg, encoding="utf-8")
+                svg = serialize()
+        write(output, svg)
+        if args.html:
+            write(args.html, accessible_html(svg, snapshot))
         if args.diagnostic:
-            args.diagnostic.write_text(make_diagnostic(source, svg, scene, options.font_family),
-                                       encoding="utf-8")
+            write(args.diagnostic, make_diagnostic(source, svg, scene, options.font_family))
         if args.scene:
-            args.scene.write_text(json.dumps(scene.to_dict(), indent=2) + "\n", encoding="utf-8")
+            write(args.scene, json.dumps(scene.to_dict(), ensure_ascii=False, indent=2)+"\n")
+        status = 0
         if args.report:
             report = compare(source, str(output), scene,
                              str(args.manifest) if args.manifest else None,
                              options.ocr, options.language)
             if fidelity is not None:
                 report["before_fidelity"] = fidelity
-            args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            write(args.report, json.dumps(report, indent=2)+"\n")
             print(json.dumps(report, indent=2))
             if args.strict and report["warnings"]:
-                return 2
-    return 0
-
-
-def _semantic_convert(data, snapshot, output, args):
-    if args.report or args.manifest or args.strict or args.diagnostic or args.source_overlays or args.no_fidelity:
-        raise ValueError("Pixel-analysis options cannot be used with a semantic PNG")
-    from .schema import validate
-    validate(snapshot)
-    with Image.open(io.BytesIO(data)) as image:
-        image.load()
-        validate_snapshot(snapshot, image)
-        config = Options.from_file(str(args.config) if args.config else None)
-        config.raster_fallback = args.allow_raster
-        config.fidelity_fallback = False
-        if args.no_raster:
-            config.raster_fallback = False
-        if args.no_ocr:
-            config.ocr = False
-        if args.font_family:
-            config.font_family = args.font_family
-        if args.lang:
-            config.language = args.lang
-        scene = merge_uia(reconstruct(image, config), image, snapshot, config.language)
-        svg = semantic_svg(scene, snapshot, config.font_family)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(svg, encoding="utf-8")
-    if args.html:
-        args.html.parent.mkdir(parents=True, exist_ok=True)
-        args.html.write_text(accessible_html(svg, snapshot), encoding="utf-8")
-    if args.scene:
-        args.scene.parent.mkdir(parents=True, exist_ok=True)
-        args.scene.write_text(json.dumps(scene.to_dict(), ensure_ascii=False, indent=2) + "\n",
-                              encoding="utf-8")
-    for warning in snapshot.get("warnings", []):
-        print("svgshot: " + warning, file=sys.stderr)
-    return 0
+                status = 2
+    for warning in (snapshot or {}).get("warnings", []):
+        print("svgshot: Recorded capture warning: " + warning, file=sys.stderr)
+    return status
 
 
 def main(argv=None) -> int:
@@ -182,8 +164,8 @@ def main(argv=None) -> int:
                 raise ValueError("Live capture returned a PNG without embedded semantic data")
             print("svgshot: PNG has no embedded semantic data; falling back to raw screenshot analysis.",
                   file=sys.stderr)
-            return _raw_convert(data, input_path, output, args)
-        return _semantic_convert(data, snapshot, output, args)
+            snapshot = None
+        return _convert(data, snapshot, output, args)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError,
             subprocess.SubprocessError) as error:
         print(f"svgshot: {error}", file=sys.stderr)
