@@ -21,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -768,8 +769,19 @@ int msaa_control_type(const VARIANT &role)
 
 std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport,
                            bool include_hidden, bool debug_unredacted, int depth,
-                           int &count, bool &truncated)
+                           int &count, bool &truncated, bool enumerate_children,
+                           std::set<IUnknown *> &visited,
+                           std::vector<com_ptr<IUnknown>> &identity_refs)
 {
+    if (enumerate_children)
+    {
+        com_ptr<IUnknown> identity;
+        if (FAILED(accessible->QueryInterface(IID_PPV_ARGS(identity.put()))) || !identity)
+            return "null";
+        if (!visited.insert(identity.get()).second)
+            return "";
+        identity_refs.push_back(std::move(identity));
+    }
     if (++count > 5000 || depth > 64)
     {
         truncated = true;
@@ -829,8 +841,9 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
         result += "\"status\":\"redacted\",\"reason\":\"potential_hidden_content\"";
     result += "}},\"text_ranges\":[],\"text_capture\":{\"status\":\"not_supported\"},\"text_selection\":{\"status\":\"not_supported\"},\"children\":[";
     LONG child_count = 0;
-    HRESULT child_count_hr = accessible->get_accChildCount(&child_count);
-    if (child_count_hr == S_OK && child_count > 0 && (!protected_content || debug_unredacted))
+    HRESULT child_count_hr = enumerate_children ? accessible->get_accChildCount(&child_count) : E_NOTIMPL;
+    if (enumerate_children && child_count_hr == S_OK && child_count > 0 &&
+        (!protected_content || debug_unredacted))
     {
         LONG amount = std::min<LONG>(child_count, 5000);
         std::vector<VARIANT> children(amount);
@@ -849,12 +862,14 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
                     {
                         VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
                         child_json = read_msaa_node(child_accessible.get(), self, viewport, include_hidden,
-                                                    debug_unredacted, depth + 1, count, truncated);
+                                                    debug_unredacted, depth + 1, count, truncated,
+                                                    true, visited, identity_refs);
                     }
                 }
                 else if (children[i].vt == VT_I4)
                     child_json = read_msaa_node(accessible, children[i], viewport, include_hidden,
-                                                debug_unredacted, depth + 1, count, truncated);
+                                                debug_unredacted, depth + 1, count, truncated,
+                                                false, visited, identity_refs);
                 if (!child_json.empty() && child_json != "null")
                 {
                     if (result.back() != '[') result += ',';
@@ -868,7 +883,7 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
         if (child_count > amount) truncated = true;
     }
     result += "],\"children_status\":{\"status\":\"" +
-              std::string(child_count_hr == S_OK ? "value" : "error") + "\"}}";
+              std::string(!enumerate_children ? "not_supported" : child_count_hr == S_OK ? "value" : "error") + "\"}}";
     VariantClear(&name); VariantClear(&value); VariantClear(&role); VariantClear(&state);
     return result;
 }
@@ -893,8 +908,11 @@ std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_u
             if (FAILED(hr) || !root)
                 throw std::runtime_error("AccessibleObjectFromWindow returned no IAccessible object");
             VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
+            std::set<IUnknown *> visited;
+            std::vector<com_ptr<IUnknown>> identity_refs;
             result->root = read_msaa_node(root.get(), self, viewport, include_hidden,
-                                          debug_unredacted, 0, result->count, result->truncated);
+                                          debug_unredacted, 0, result->count, result->truncated,
+                                          true, visited, identity_refs);
             winrt::uninit_apartment();
         }
         catch (const winrt::hresult_error &e)

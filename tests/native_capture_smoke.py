@@ -74,6 +74,9 @@ if len(sys.argv)>1:
         assert selected_snapshot['source']['provider'] in ('windows-uia', 'windows-msaa')
         if api != 'auto':
             assert selected_snapshot['source']['provider'] == 'windows-' + api
+        if api == 'msaa':
+            assert not any('tree truncated' in warning for warning in selected_snapshot['warnings']), \
+                'MSAA traversal repeated children until the node limit'
     compatibility=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],
         '--print-window','--stdout'],stdout=subprocess.PIPE,check=True,timeout=30)
     compatible=read_snapshot(io.BytesIO(compatibility.stdout))
