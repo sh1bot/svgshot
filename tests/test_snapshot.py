@@ -50,12 +50,16 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(self.png.read_bytes().startswith(self.original[:-12]))
         self.assertEqual(decode_snapshot(encode_snapshot(self.snapshot)), self.snapshot)
 
-    def test_png_only_replay_preserves_extended_metadata_and_export(self):
+    def test_png_replay_omits_raw_json_but_preserves_labels_and_export(self):
         self.embed()
         svg, exported = self.directory/'capture.svg', self.directory/'export.json'
         self.assertEqual(render_capture([str(svg), '--image', str(self.png), '--no-ocr']), 0)
-        metadata = ET.parse(svg).find('.//{http://www.w3.org/2000/svg}metadata')
-        self.assertEqual(json.loads(metadata.text), self.snapshot)
+        root = ET.parse(svg).getroot()
+        self.assertIsNone(root.find('.//{http://www.w3.org/2000/svg}metadata'))
+        self.assertEqual(root.find('{http://www.w3.org/2000/svg}title').text,
+                         self.snapshot['root']['label'])
+        self.assertTrue(any('Window Ω <&>' in node.get('aria-label', '')
+                            for node in root.iter()))
         self.assertEqual(main([str(self.png), '--json', str(exported)]), 0)
         self.assertEqual(json.loads(exported.read_text()), self.snapshot)
 

@@ -60,7 +60,8 @@ class UnifiedSchemaTests(unittest.TestCase):
                 capture_helper.assert_called_once()
             self.assertEqual((root/'saved.svg').read_bytes(),(root/'direct.svg').read_bytes())
             self.assertEqual(sorted(p.name for p in root.iterdir()),['direct.svg','input.png','saved.svg'])
-            self.assertIn('svgshot.capture',(root/'direct.svg').read_text())
+            self.assertIn('aria-label="Keep, checkbox, mixed, disabled"',
+                          (root/'direct.svg').read_text())
 
     def test_png_without_semantics_warns_and_uses_pixel_analysis(self):
         image=Image.new('RGB',(8,8),'white')

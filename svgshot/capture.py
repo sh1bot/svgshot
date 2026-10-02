@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import math
 import sys
@@ -639,7 +638,6 @@ def describe(item):
 
 
 def semantic_svg(scene, snapshot, font_family="auto"):
-    original = snapshot
     snapshot = render_view(snapshot)
     visual = to_svg(scene, font_family)
     start, body = visual.split(">", 1)
@@ -648,7 +646,6 @@ def semantic_svg(scene, snapshot, font_family="auto"):
     start = start.replace('role="img"', 'role="graphics-document group" aria-labelledby="capture-title" aria-describedby="capture-description"')
     parts = [start+">", f'<title id="capture-title">{escape(title)}</title>',
              '<desc id="capture-description">Static window capture. Represented controls are informational and cannot be operated.</desc>',
-             '<metadata id="uia-snapshot">'+escape(json.dumps(original, ensure_ascii=False))+'</metadata>',
              '<g aria-hidden="true" data-kind="visual-reconstruction">', body.rsplit("</svg>", 1)[0]]
     parts.append('</g>')
     serial = 0
@@ -664,7 +661,7 @@ def semantic_svg(scene, snapshot, font_family="auto"):
             x, y, w, h = box
             label = describe(item)
             # Descriptive groups avoid promising live button/edit interactions.
-            # Exact original role/properties remain in data attributes + metadata.
+            # Preserve role and identity alongside the descriptive label.
             parts.append(f'<g id="capture-node-{serial}" role="group" aria-label="{escape(label, quote=True)}" '
                          f'data-uia-id="{escape(item.get("id", ""), quote=True)}" data-uia-role="{kind(item)}">')
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#000000" fill-opacity="0" aria-hidden="true"/>')
