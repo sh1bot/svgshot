@@ -1200,10 +1200,16 @@ def _table_text(source, texts, language):
     return None, []
 
 
-def reconstruct(image: Image.Image, options: Options) -> Node:
+def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> Node:
     if image.width * image.height > 25_000_000:
         raise ValueError("PNG exceeds the 25-megapixel limit")
     rgb_image = image.convert("RGB")
+    if artwork_boxes:
+        rgb_image = rgb_image.copy()
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(rgb_image)
+        for x,y,w,h in artwork_boxes:
+            draw.rectangle((x,y,x+w-1,y+h-1), fill="white")
     pixels = np.asarray(rgb_image)
     h, w = pixels.shape[:2]
     background = _background(pixels)

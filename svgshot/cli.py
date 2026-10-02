@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .capture import accessible_html, merge_uia, semantic_svg, validate_snapshot
+from .capture import accessible_html, merge_uia, semantic_icon_boxes, semantic_svg, validate_snapshot
 from .diagnostic import make_diagnostic
 from .grab import add_options, capture_bytes, options as capture_options
 from .recognize import Options, reconstruct
@@ -84,7 +84,8 @@ def _convert(data, snapshot, output, args):
         source.load()
         if snapshot is not None:
             validate_snapshot(snapshot, source)
-        scene = reconstruct(source, options)
+        icons = semantic_icon_boxes(source, snapshot) if snapshot is not None else []
+        scene = reconstruct(source, options, artwork_boxes=icons)
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
         def serialize():

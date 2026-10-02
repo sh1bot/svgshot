@@ -12,7 +12,7 @@ from html import escape
 from PIL import Image
 
 from .model import Node, flatten
-from .artwork import trace_artwork
+from .artwork import colored_icons, trace_artwork
 from .recognize import _ocr_ui
 from .svg import to_svg, _font
 from .schema import render_view
@@ -205,6 +205,41 @@ def terminal_text(image, item, snapshot):
     return nodes
 
 
+def semantic_icon_boxes(image, snapshot):
+    """Identify leading icons and header sort marks before their pixels reach OCR."""
+    snapshot = render_view(snapshot)
+    items = list(visible_items(snapshot["root"], snapshot))
+    slots = []
+    menus = [local_box(n["bounds"],snapshot) for n in items if kind(n) == "menubar"]
+    if menus and min(b[1] for b in menus) >= 24:
+        slots.append((0, 0, 40, min(45,min(b[1] for b in menus))))
+    for item in items:
+        x, y, w, h = local_box(item["bounds"], snapshot)
+        if kind(item) == "listitem" and 14 <= h <= 48 and w > 80:
+            slots.append((x, y, min(32,w), h))
+        elif kind(item) == "treeitem" and 12 <= h <= 48:
+            slots.append((max(0,x-24), max(0,y-4), 36, h+8))
+    boxes = colored_icons(image, slots)
+    import numpy as np
+    from scipy import ndimage
+    pixels = np.asarray(image.convert("RGB"))
+    for item in items:
+        if kind(item) != "headeritem":
+            continue
+        x,y,w,h = local_box(item["bounds"],snapshot)
+        strip = pixels[y:y+h//3,x:x+w]
+        labels, _ = ndimage.label(strip.max(axis=2) < 170, structure=np.ones((3,3)))
+        for slices in ndimage.find_objects(labels):
+            if slices is None:
+                continue
+            ys,xs = slices
+            iw,ih = xs.stop-xs.start,ys.stop-ys.start
+            # Exclude cut-off caption strokes along the strip's lower edge.
+            if 6 <= iw <= 16 and 3 <= ih <= 10 and ys.stop < strip.shape[0]:
+                boxes.append((x+xs.start-1,y+ys.start-1,iw+2,ih+2))
+    return sorted(set(boxes))
+
+
 def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
@@ -218,7 +253,9 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     ocr = [n for n in flatten(scene) if n.kind == "text"]
     chrome_boxes = [local_box(n["bounds"], snapshot) for n in items if id(n) in chrome]
     suppressed = {id(n) for n in ocr if any(contains(b, n.box) for b in chrome_boxes)}
-    controls, text_nodes, artwork = [], [], []
+    controls, text_nodes = [], []
+    icon_boxes = semantic_icon_boxes(image, snapshot)
+    artwork = [trace_artwork(image, b) for b in icon_boxes]
     text_boxes = [local_box(n["bounds"], snapshot) for n in items if kind(n) == "text"]
     terminals = {id(n) for n in items if n.get("class_name") == "TermControl"}
     authoritative = [local_box(n["bounds"], snapshot) for n in items
@@ -268,6 +305,43 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         matches = [n for n in ocr if id(n) not in suppressed and
                    overlap(box, n.box) > min(n.box[2]*n.box[3], box[2]*box[3])*.35]
         exact = [n for n in matches if normalize(n.text) == normalize(text)]
+        # Cropped captions can be joined to neighbours, truncated, or prefixed
+        # with OCR from an icon. Retry only inside a verified semantic region.
+        if (ocr_enabled and owner.get("framework_id") == "MSAA"
+                and (not exact or any(n.box[3] > box[3]*.7 for n in exact))
+                and kind(owner) in {"menuitem", "headeritem", "tabitem", "treeitem", "listitem"}):
+            x,y,w,h = box
+            if kind(owner) == "tabitem":
+                pad = min(8, w//8)
+                x += pad
+                w -= pad*2
+            nearby_icons = [b for b in icon_boxes if overlap(b,box)]
+            if nearby_icons:
+                left = max(b[0]+b[2]+2 for b in nearby_icons)
+                if kind(owner) == "treeitem":
+                    w = min(image.width-x, max(w, len(text)*h*.65+left-x))
+                w -= left-x
+                x = left
+            if kind(owner) == "listitem":
+                headers = [local_box(n["bounds"],snapshot) for n in items if kind(n) == "headeritem"]
+                first = next((b for b in headers if b[0] <= x < b[0]+b[2]), None)
+                if first:
+                    w = min(w, first[0]+first[2]-x-2)
+            if w > 0:
+                for candidate in _ocr_ui(image.crop((x,y,x+w,y+h)),language,psm=7):
+                    full_match = normalize(candidate.text).strip(" /") == normalize(text).strip(" /")
+                    # Some suffix glyphs receive zero OCR confidence. A strong
+                    # prefix plus additional ink in the same bounded cell lets
+                    # the accessible name supply those missing characters.
+                    ink = ink_box(image,(x,y,w,h)) if kind(owner) == "listitem" else None
+                    prefix_match = (candidate.confidence >= .8 and len(candidate.text) >= 8
+                                    and normalize(text).startswith(normalize(candidate.text)+" ")
+                                    and ink and ink[2] > candidate.box[2]+20)
+                    if full_match or prefix_match:
+                        a,b,c,d = candidate.box
+                        candidate.box = ink if prefix_match else (x+a,y+b,c,d)
+                        exact = [candidate]
+                        break
         if owner.get("framework_id") == "MSAA" or (owner.get("framework_id") == "Chrome" and kind(owner) in {"listitem", "tabitem"}):
             # Accessible names can be complete while the painted cell is clipped.
             # Never use a row-wide rectangle to erase the other table columns.
@@ -277,7 +351,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                 prefix = a.rstrip(". ")
                 return a == b or (a.endswith("...") and len(prefix) >= 6 and b.startswith(prefix)) or (
                     len(a) >= 6 and SequenceMatcher(None, a, b).ratio() >= .92)
-            candidates = [n for n in ocr if id(n) not in suppressed and matches_name(n)]
+            candidates = exact or [n for n in ocr if id(n) not in suppressed and matches_name(n)]
             if candidates:
                 chosen = min(candidates, key=lambda n: abs(n.box[1]-box[1])+abs(n.box[0]-box[0]))
                 matches = exact = [chosen]
@@ -420,7 +494,10 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                     if x >= 28:
                         artwork.append(trace_artwork(image, (x-28, y+(h-24)//2, 24, min(24,h))))
                 name = name.removeprefix("Start of Quick Access - ").removeprefix("End of Quick Access - ").removesuffix(" (pinned)")
-            if role in {"button", "radiobutton", "tabitem"} and (not native or box[2] < box[3]*1.8 and len(name) > 3) and not any(normalize(n.text) == normalize(name) for n in ocr if contains(box, n.box)):
+            if (role in {"button", "radiobutton", "tabitem"}
+                    and not (role == "tabitem" and item.get("framework_id") == "MSAA")
+                    and (not native or box[2] < box[3]*1.8 and len(name) > 3)
+                    and not any(normalize(n.text) == normalize(name) for n in ocr if contains(box, n.box))):
                 continue
             emit(name, box, item, centered=role in {"button", "tabitem"})
         elif role == "splitbutton" and name:
@@ -474,6 +551,14 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         kind(item) == "scrollbar" and overlap(local_box(item["bounds"], snapshot), n.box) > n.box[2]*n.box[3]*.35
         for item in items))
     suppressed.update(id(n) for n in ocr if any(overlap(n.box, a.box) > n.box[2]*n.box[3]*.35 for a in artwork))
+    for item in items:
+        if kind(item) == "headeritem":
+            box = local_box(item["bounds"],snapshot)
+            for n in ocr:
+                if (len(n.text.strip()) <= 1 and contains(box,n.box)
+                        and n.box[3] <= box[3]*.3):
+                    artwork.append(trace_artwork(image,n.box))
+                    suppressed.add(id(n))
     for n in ocr:
         if n.box[1] < 45 and n.box[0] > image.width-160 and len(n.text) <= 2:
             artwork.append(trace_artwork(image, n.box))

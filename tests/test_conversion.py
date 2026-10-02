@@ -24,7 +24,7 @@ class ConversionTests(unittest.TestCase):
                 'root':{'id':'n1','role':'window','bounds':[0,0,120,80],'children':[]}}
             semantic.write_bytes(embed_snapshot(raw.read_bytes(),snapshot))
             seen = []
-            def recognize(image, options):
+            def recognize(image, options, **kwargs):
                 seen.append(vars(options).copy())
                 return Node('window',(0,0,120,80),color='#ffffff')
             errors = io.StringIO()

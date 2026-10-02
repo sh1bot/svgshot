@@ -692,7 +692,7 @@ struct Snapshot
         CloseHandle(done);
     }
 };
-std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden, bool debug_unredacted)
+std::shared_ptr<Snapshot> start_uia(HWND hwnd, bool include_hidden, bool debug_unredacted)
 {
     auto result = std::make_shared<Snapshot>();
     std::thread worker([hwnd, result, include_hidden, debug_unredacted] {
@@ -722,15 +722,24 @@ std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden, bool debug_un
         }
         SetEvent(result->done);
     });
-    if (WaitForSingleObject(result->done, 20000) != WAIT_OBJECT_0)
-    {
-        worker.detach();
-        throw std::runtime_error("UI Automation provider did not respond within 20 seconds");
-    }
-    worker.join();
+    worker.detach();
+    return result;
+}
+
+std::shared_ptr<Snapshot> finish_snapshot(std::shared_ptr<Snapshot> result, DWORD timeout,
+                                          const char *provider)
+{
+    // Only inspect worker-owned fields after the completion event is signalled.
+    if (WaitForSingleObject(result->done, timeout) != WAIT_OBJECT_0)
+        throw std::runtime_error(std::string(provider) + " provider did not respond within 20 seconds");
     if (!result->error.empty())
         throw std::runtime_error(result->error);
     return result;
+}
+
+std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden, bool debug_unredacted)
+{
+    return finish_snapshot(start_uia(hwnd, include_hidden, debug_unredacted), 20000, "UI Automation");
 }
 
 int msaa_control_type(const VARIANT &role)
@@ -922,7 +931,7 @@ std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport
     return result;
 }
 
-std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_unredacted,
+std::shared_ptr<Snapshot> start_msaa(HWND hwnd, bool include_hidden, bool debug_unredacted,
                                    RECT viewport)
 {
     auto result = std::make_shared<Snapshot>();
@@ -959,15 +968,15 @@ std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_u
         }
         SetEvent(result->done);
     });
-    if (WaitForSingleObject(result->done, 20000) != WAIT_OBJECT_0)
-    {
-        worker.detach();
-        throw std::runtime_error("MSAA provider did not respond within 20 seconds");
-    }
-    worker.join();
-    if (!result->error.empty())
-        throw std::runtime_error(result->error);
+    worker.detach();
     return result;
+}
+
+std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_unredacted,
+                                   RECT viewport)
+{
+    return finish_snapshot(start_msaa(hwnd, include_hidden, debug_unredacted, viewport),
+                           20000, "MSAA");
 }
 
 int accessibility_score(const std::string &raw)
@@ -992,6 +1001,89 @@ int accessibility_score(const std::string &raw)
         return score;
     };
     return visit(root);
+}
+
+struct AutoSnapshot
+{
+    std::shared_ptr<Snapshot> uia, msaa;
+    std::string uia_error, msaa_error;
+    int uia_score = -1, msaa_score = -1;
+    bool uia_done = false;
+};
+AutoSnapshot collect_auto(const std::function<std::shared_ptr<Snapshot>()> &uia_factory,
+                          const std::function<std::shared_ptr<Snapshot>()> &msaa_factory,
+                          DWORD head_start = 1000, DWORD timeout = 20000)
+{
+    AutoSnapshot result;
+    auto &uia = result.uia, &msaa = result.msaa;
+    auto &uiaError = result.uia_error, &msaaError = result.msaa_error;
+    auto pendingUia = uia_factory();
+    std::shared_ptr<Snapshot> pendingMsaa;
+    bool uiaDone = false, msaaDone = false;
+    int &us = result.uia_score, &ms = result.msaa_score;
+    auto started = std::chrono::steady_clock::now();
+    // Give modern UIA a head start. A silent provider need not hold up
+    // capture when the independent MSAA collector has useful data.
+    WaitForSingleObject(pendingUia->done, head_start);
+    while (true)
+    {
+        if (!uiaDone && WaitForSingleObject(pendingUia->done, 0) == WAIT_OBJECT_0)
+        {
+            uiaDone = true;
+            uiaError = pendingUia->error;
+            if (uiaError.empty())
+            {
+                uia = pendingUia;
+                us = accessibility_score(uia->root);
+            }
+        }
+        if (pendingMsaa && !msaaDone && WaitForSingleObject(pendingMsaa->done, 0) == WAIT_OBJECT_0)
+        {
+            msaaDone = true;
+            msaaError = pendingMsaa->error;
+            if (msaaError.empty())
+            {
+                msaa = pendingMsaa;
+                ms = accessibility_score(msaa->root);
+            }
+        }
+        if (us >= 12 || ms >= 12 || (uiaDone && msaaDone))
+            break;
+        if (!pendingMsaa)
+            pendingMsaa = msaa_factory();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now()-started).count();
+        if (elapsed >= timeout)
+            break;
+        HANDLE handles[2]; DWORD count = 0;
+        if (!uiaDone) handles[count++] = pendingUia->done;
+        if (!msaaDone) handles[count++] = pendingMsaa->done;
+        WaitForMultipleObjects(count, handles, FALSE, static_cast<DWORD>(timeout-elapsed));
+    }
+    if (!uiaDone) uiaError = "UI Automation provider was still pending";
+    if (pendingMsaa && !msaaDone) msaaError = "MSAA provider was still pending";
+    result.uia_done = uiaDone;
+    return result;
+}
+
+bool accessibility_selection_self_test()
+{
+    // A silent UIA provider must not delay a ready, detailed MSAA result.
+    auto hung = std::make_shared<Snapshot>();
+    auto ready = std::make_shared<Snapshot>();
+    ready->root = R"({"control_type":50032,"bounds":[0,0,100,100],"offscreen":false,"children":[
+        {"control_type":50020,"name":"one","bounds":[0,0,10,10],"offscreen":false},
+        {"control_type":50020,"name":"two","bounds":[0,10,10,10],"offscreen":false},
+        {"control_type":50020,"name":"three","bounds":[0,20,10,10],"offscreen":false}]})";
+    SetEvent(ready->done);
+    auto begin = std::chrono::steady_clock::now();
+    auto result = collect_auto([&] { return hung; }, [&] { return ready; }, 1, 1000);
+    if (result.msaa != ready || result.uia || result.uia_done ||
+        std::chrono::steady_clock::now()-begin >= std::chrono::milliseconds(500)) return false;
+    // Healthy UIA keeps priority and avoids starting the legacy collector.
+    bool legacy_started = false;
+    result = collect_auto([&] { return ready; }, [&] { legacy_started = true; return hung; }, 1, 1000);
+    return result.uia == ready && !legacy_started;
 }
 
 // Compare integrity levels without retaining process IDs or token contents.
@@ -1588,6 +1680,11 @@ int wmain(int argc, wchar_t **argv)
 {
     if (argc == 2 && std::wstring(argv[1]) == L"--geometry-self-test")
         return msaa_geometry_self_test() ? 0 : 1;
+    if (argc == 2 && std::wstring(argv[1]) == L"--accessibility-selection-self-test")
+    {
+        winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        return accessibility_selection_self_test() ? 0 : 1;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--version")
     {
         std::cout << "svgshot-capture-win " << SVGSHOT_COMMIT << "\n";
@@ -1709,21 +1806,17 @@ int wmain(int argc, wchar_t **argv)
         {
             std::shared_ptr<Snapshot> uia, msaa;
             std::string uiaError, msaaError;
-            try { uia = read_uia(hwnd, includeHidden, debugUnredacted); }
-            catch (const std::exception &e) { uiaError = e.what(); }
-            int us = uia ? accessibility_score(uia->root) : -1;
-            // Most modern UIA trees need no legacy probe. Try MSAA when UIA
-            // failed or exposes too few named elements to describe the window.
-            if (!uia || us < 12)
-            {
-                try { msaa = read_msaa(hwnd, includeHidden || debugUnredacted, debugUnredacted, before); }
-                catch (const std::exception &e) { msaaError = e.what(); }
-            }
+            auto collected = collect_auto(
+                [&] { return start_uia(hwnd, includeHidden, debugUnredacted); },
+                [&] { return start_msaa(hwnd, includeHidden || debugUnredacted, debugUnredacted, before); });
+            uia = collected.uia; msaa = collected.msaa;
+            uiaError = collected.uia_error; msaaError = collected.msaa_error;
+            int us = collected.uia_score, ms = collected.msaa_score;
+            bool uiaDone = collected.uia_done;
             if (!uia && !msaa)
                 throw std::runtime_error("Both UIA and MSAA failed (UIA: " + uiaError + "; MSAA: " + msaaError + ")");
             if (uia && msaa)
             {
-                int ms = accessibility_score(msaa->root);
                 snapshot = ms > us ? msaa : uia;
                 apiSelectionWarning = "Automatic accessibility API selection chose " +
                     (snapshot == msaa ? std::string("MSAA") : std::string("UIA")) +
@@ -1740,7 +1833,9 @@ int wmain(int argc, wchar_t **argv)
             else
             {
                 snapshot = msaa;
-                apiSelectionWarning = "Automatic accessibility API selection used MSAA because UIA failed: " + uiaError;
+                apiSelectionWarning = !uiaDone
+                    ? "Automatic accessibility API selection used MSAA while UIA was still pending."
+                    : "Automatic accessibility API selection used MSAA because UIA failed: " + uiaError;
             }
         }
         SIZE size{before.right - before.left, before.bottom - before.top};

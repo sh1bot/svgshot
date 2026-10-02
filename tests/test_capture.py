@@ -5,11 +5,11 @@ from unittest.mock import patch
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 from svgshot.svg import to_svg
 from svgshot.validate import render
 
-from svgshot.capture import main, local_box, merge_uia, semantic_svg, accessible_html
+from svgshot.capture import main, local_box, merge_uia, semantic_icon_boxes, semantic_svg, accessible_html
 from svgshot.model import Node, flatten
 from svgshot.snapshot import embed_snapshot
 
@@ -48,6 +48,39 @@ def semantic_snapshot():
 
 
 class CaptureTests(unittest.TestCase):
+    def test_header_sort_mark_is_excluded_without_masking_its_caption(self):
+        s = snapshot()
+        s['root']['children'] = [element(50035,'Name',[120,225,120,36],framework_id='MSAA')]
+        image = Image.new('RGB',(300,180),'white')
+        draw = ImageDraw.Draw(image)
+        draw.polygon(((70,27),(65,32),(75,32)),fill='#777777')
+        draw.text((25,40),'Name',fill='black')
+        boxes = semantic_icon_boxes(image,s)
+        self.assertEqual(len(boxes),1)
+        self.assertLess(boxes[0][1]+boxes[0][3],40)
+
+    def test_leading_row_icon_is_artwork_and_does_not_consume_the_caption(self):
+        s = snapshot()
+        s['root']['children'] = [element(50007,'Known service',[120,225,250,25],framework_id='MSAA')]
+        image = Image.new('RGB',(300,180),'white')
+        ImageDraw.Draw(image).rectangle((23,29,38,44),fill='#427ba1')
+        boxes = semantic_icon_boxes(image,s)
+        self.assertEqual(len(boxes),1)
+        scene = Node('root',(0,0,300,180),children=[
+            Node('text',(24,30,10,13),text='Ch'),
+            Node('text',(45,30,95,14),text='Known service')])
+        merge_uia(scene,image,s)
+        self.assertEqual([n.text for n in flatten(scene) if n.kind=='text'],['Known service'])
+        self.assertTrue(any(n.kind=='capture-artwork' for n in flatten(scene)))
+
+    def test_msaa_caption_retry_recovers_suffix_missing_from_page_ocr(self):
+        s = snapshot()
+        s['root']['children'] = [element(50007,'Installer (suffix)',[120,225,250,25],framework_id='MSAA')]
+        scene = Node('root',(0,0,300,180),children=[Node('text',(45,30,55,14),text='Installer')])
+        with patch('svgshot.capture._ocr_ui',return_value=[Node('text',(25,5,115,14),text='Installer (suffix)')]):
+            merge_uia(scene,Image.new('RGB',(300,180),'white'),s)
+        self.assertEqual([n.text for n in flatten(scene) if n.kind=='text'],['Installer (suffix)'])
+
     def test_msaa_row_does_not_erase_other_columns_or_invent_offscreen_names(self):
         s = snapshot()
         s['root']['children'] = [element(50007, 'Known service', [120,225,250,25], framework_id='MSAA'),

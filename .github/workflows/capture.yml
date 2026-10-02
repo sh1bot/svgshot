@@ -23,6 +23,8 @@ jobs:
         run: |
           & build/capture/Release/svgshot-capture-win.exe --geometry-self-test
           if ($LASTEXITCODE -ne 0) { throw '150% DPI geometry regression' }
+          & build/capture/Release/svgshot-capture-win.exe --accessibility-selection-self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Accessibility selection regression' }
           $fixture = Start-Process build/capture/Release/svgshot-capture-win.exe -ArgumentList '--fixture' -PassThru
           try {
             for ($i = 0; $i -lt 40; $i++) {

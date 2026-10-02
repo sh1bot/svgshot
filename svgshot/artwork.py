@@ -1,6 +1,33 @@
 """Deterministic vector simplification of screenshot artwork."""
 from .model import Node
 
+def colored_icons(image, regions):
+    """Find compact coloured artwork inside known leading-icon regions.
+
+    The caller supplies bounded UI slots, not arbitrary text areas. Large
+    selection backgrounds and isolated antialias pixels are excluded.
+    """
+    import numpy as np
+    from scipy import ndimage
+    pixels = np.asarray(image.convert("RGB")).astype(int)
+    boxes = set()
+    for x, y, w, h in regions:
+        x, y = max(0, round(x)), max(0, round(y))
+        right, bottom = min(image.width, round(x+w)), min(image.height, round(y+h))
+        patch = pixels[y:bottom, x:right]
+        if not patch.size:
+            continue
+        mask = (patch.max(axis=2)-patch.min(axis=2) > 22) & (patch.min(axis=2) < 210)
+        labels, _ = ndimage.label(ndimage.binary_closing(mask, structure=np.ones((3,3))))
+        for slices in ndimage.find_objects(labels):
+            if slices is None:
+                continue
+            ys, xs = slices
+            iw, ih = xs.stop-xs.start, ys.stop-ys.start
+            if 8 <= iw <= 36 and 8 <= ih <= 36 and .6 <= iw/ih <= 1.6:
+                boxes.add((max(0,x+xs.start-1), max(0,y+ys.start-1), iw+2, ih+2))
+    return sorted(boxes)
+
 def trace_artwork(image, box, *, opaque=False):
     """Simplify screenshot ink into flat vector contours, without font dependence."""
     import numpy as np
