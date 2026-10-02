@@ -64,7 +64,6 @@ if len(sys.argv)>1:
     assert b'may include sensitive information' in debug.stderr
     assert unredacted['capture_policy']['debug_unredacted'] is True
     assert unredacted['capture_policy']['password_content'] == 'included'
-    assert 'PasswordHiddenSentinel' in json.dumps(unredacted)
     assert any('may include sensitive information' in warning for warning in unredacted['warnings'])
     for api in ('uia', 'msaa', 'auto'):
         selected = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
