@@ -117,6 +117,21 @@ backend changes focus, selection, scroll position or values to obtain content.
 
 Windows retains its provider-specific snapshot under `native.snapshot`, including
 typed UIA properties, patterns, text attributes, error statuses and capture limits.
+Optional `native.snapshot.dpi` records `before` and `after` observations: system
+DPI, collector and target window awareness, target process awareness, window DPI,
+physical and window-context bounds, and intersecting displays' effective DPI and
+reported scale percentage. For an offscreen window it records the nearest display.
+Numeric queries use `{status, value}` observations; failures retain an error code
+and its domain. Display bounds are screen pixels; context bounds use the recorded
+window awareness and may be virtualized. These facts do not change PNG coordinates
+or establish the original resolution of bitmap assets. A capture warning reports
+changes between the two observations. Display names and hardware identifiers are
+not collected.
+`capture_policy.bitmap_dpi_context_requested` records the requested `per-monitor`
+or `window` or `application` capture context; `bitmap_dpi_awareness` records the resolved mode.
+Visible-screen copies always use physical per-monitor coordinates. Matching the
+window context can change PrintWindow's bitmap dimensions; `source_to_image`
+still maps physical screen coordinates to the actual PNG dimensions.
 macOS and Linux currently retain node records under `native.nodes`, keyed by the
 same node IDs. `native_ref` identifies a node's native record. Native records are
 not unrestricted dumps: password content is never captured, and default policies

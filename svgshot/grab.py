@@ -35,9 +35,13 @@ def helper(platform, explicit=None):
 
 def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=False, delay=0,
                   include_hidden_content=False, debug_unredacted=False,
-                  accessibility_api="auto", bitmap=None, window_bounds=None):
+                  accessibility_api="auto", capture_dpi_context="per-monitor", bitmap=None, window_bounds=None):
     if not 0 <= delay <= 60:
         raise ValueError('Delay must be 0–60 seconds')
+    if capture_dpi_context not in ('per-monitor', 'window', 'application'):
+        raise ValueError('--capture-dpi-context must be per-monitor, window, or application')
+    if sys.platform != 'win32' and capture_dpi_context != 'per-monitor':
+        raise ValueError('--capture-dpi-context is available only on Windows')
     if sys.platform == 'win32':
         if window is not None or bitmap or window_bounds:
             raise ValueError('Linux/macOS window options are not applicable on Windows')
@@ -54,6 +58,8 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
             command += ['--unredacted']
         if accessibility_api != 'auto':
             command += ['--accessibility-api', accessibility_api]
+        if capture_dpi_context != 'per-monitor':
+            command += ['--capture-dpi-context', capture_dpi_context]
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+60)
         png = result.stdout
         snapshot = read_snapshot(io.BytesIO(png))
@@ -128,6 +134,8 @@ def add_options(parser):
                         help='Include content normally redacted, including passwords; may capture sensitive information')
     parser.add_argument('--accessibility-api', choices=('auto', 'uia', 'msaa'), default='auto',
                         help='Windows accessibility source (default: choose the richer UIA/MSAA tree)')
+    parser.add_argument('--capture-dpi-context', choices=('per-monitor', 'window', 'application'), default='per-monitor',
+                        help='Windows: experimental bitmap capture thread context (default: per-monitor)')
     parser.add_argument('--bitmap', type=Path, help='Linux: explicitly pair a window bitmap with the selected AT-SPI window')
     parser.add_argument('--window-bounds', type=float, nargs=4, metavar=('X','Y','W','H'),
                         help='Linux: source bounds represented by --bitmap')
@@ -139,6 +147,7 @@ def options(args):
                 include_hidden_content=args.include_hidden_content,
                 debug_unredacted=args.debug_unredacted,
                 accessibility_api=args.accessibility_api,
+                capture_dpi_context=args.capture_dpi_context,
                 bitmap=args.bitmap, window_bounds=args.window_bounds)
 
 

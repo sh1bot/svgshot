@@ -54,7 +54,8 @@ def _parser():
 def _has_capture_options(args):
     return any((args.helper, args.hwnd, args.window, args.foreground, args.delay,
                 args.include_hidden_content, args.debug_unredacted,
-                args.accessibility_api != "auto", args.bitmap, args.window_bounds))
+                args.accessibility_api != "auto", args.capture_dpi_context != "per-monitor",
+                args.bitmap, args.window_bounds))
 
 
 def _convert(data, snapshot, output, args):

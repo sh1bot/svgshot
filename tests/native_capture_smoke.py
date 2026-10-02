@@ -14,7 +14,35 @@ def walk(node):
             yield from walk(child)
 
 
+def validate_dpi(capture):
+    dpi = capture['native']['snapshot']['dpi']
+    for timing in ('before', 'after'):
+        observed = dpi[timing]
+        assert observed['measurement_awareness'] == 'per-monitor-v2'
+        assert observed['collector_awareness'] == 'per-monitor-v2'
+        assert observed['system_dpi']['status'] == 'value'
+        window = observed['window']
+        assert window['awareness'] == 'per-monitor-v2', 'Wrong fixture window awareness'
+        assert window['process_awareness']['value'] == 'per-monitor'
+        assert window['process_context']['value'] == 'per-monitor-v2'
+        assert window['dpi']['value'] > 0
+        for field in ('physical_window_bounds', 'context_window_bounds', 'context_client_bounds'):
+            assert window[field]['status'] == 'value'
+            assert len(window[field]['value']) == 4
+        assert window['physical_window_bounds']['value'] == window['context_window_bounds']['value']
+        assert observed['display_enumeration']['status'] == 'value'
+        displays = observed['displays']
+        assert displays and all(d['status'] == 'value' for d in displays)
+        selected = [d for d in displays if d['window_monitor']]
+        assert len(selected) == 1
+        assert selected[0]['effective_dpi']['value'] == window['dpi']['value'], 'Monitor DPI probe mismatch'
+        assert all(d['scale_percent']['status'] == 'value' and d['scale_percent']['value'] > 0 for d in displays)
+        assert all(set(d) == {'status','bounds','primary','window_monitor','intersects_window',
+                              'effective_dpi','scale_percent'} for d in displays), 'Unexpected display identifiers'
+
+
 snapshot = read_snapshot('build/live.png')
+validate_dpi(snapshot)
 assert snapshot == json.loads(Path('build/live.uia.json').read_text(encoding='utf-8')), 'PNG/JSON mismatch'
 assert snapshot['version'] == 3, 'Wrong schema version'
 from svgshot.schema import validate
@@ -52,6 +80,7 @@ if len(sys.argv)>1:
     import subprocess,io
     result=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],'--stdout'],stdout=subprocess.PIPE,check=True)
     streamed=read_snapshot(io.BytesIO(result.stdout))
+    validate_dpi(streamed)
     validate(streamed)
     assert streamed['root']['label']=='svgshot Capture Fixture'
     assert 'PasswordHiddenSentinel' not in json.dumps(streamed)
@@ -70,6 +99,7 @@ if len(sys.argv)>1:
             '--accessibility-api', api, '--stdout'], stdout=subprocess.PIPE,
             check=True, timeout=30)
         selected_snapshot = read_snapshot(io.BytesIO(selected.stdout))
+        validate_dpi(selected_snapshot)
         validate(selected_snapshot)
         assert selected_snapshot['source']['provider'] in ('windows-uia', 'windows-msaa')
         if api != 'auto':
@@ -87,6 +117,7 @@ if len(sys.argv)>1:
     compatibility=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],
         '--print-window','--stdout'],stdout=subprocess.PIPE,check=True,timeout=30)
     compatible=read_snapshot(io.BytesIO(compatibility.stdout))
+    validate_dpi(compatible)
     validate(compatible)
     assert compatible['root']['label']=='svgshot Capture Fixture'
     assert compatible['capture_policy']['bitmap_method']=='printwindow'
@@ -111,8 +142,53 @@ if len(sys.argv)>1:
     screen = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
         '--screen', '--stdout'], stdout=subprocess.PIPE, check=True, timeout=30)
     visible = read_snapshot(io.BytesIO(screen.stdout))
+    validate_dpi(visible)
     validate(visible)
     assert visible['capture_policy']['bitmap_method'] == 'screen'
+    # The context switch must happen on the PrintWindow worker, not just on the
+    # caller. An unaware fixture remains unaware in a PMv2 process (mixed mode).
+    import time
+    unaware = subprocess.Popen(['build/capture/Release/svgshot-capture-win.exe','--fixture-unaware'])
+    try:
+        user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM),wintypes.LPARAM]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        candidates = []
+        @ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+        def find_unaware(window, parameter):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(window,ctypes.byref(pid))
+            if pid.value == unaware.pid and user32.IsWindowVisible(window):
+                candidates.append(window)
+            return True
+        for attempt in range(50):
+            candidates.clear()
+            user32.EnumWindows(find_unaware,0)
+            if candidates: break
+            time.sleep(.1)
+        assert candidates, 'Unaware fixture did not open'
+        for context in ('per-monitor','window','application'):
+            captured = subprocess.run(['build/capture/Release/svgshot-capture-win.exe',
+                '--hwnd',str(candidates[0]),'--stdout','--print-window',
+                '--accessibility-api','msaa','--capture-dpi-context',context],
+                stdout=subprocess.PIPE,check=True,timeout=30)
+            mixed = read_snapshot(io.BytesIO(captured.stdout))
+            validate(mixed)
+            raw = mixed['native']['snapshot']
+            assert raw['dpi']['before']['window']['awareness'] == 'unaware'
+            assert raw['dpi']['before']['window']['dpi']['value'] == 96
+            assert raw['dpi']['before']['window']['process_context']['value'] == 'per-monitor-v2'
+            assert mixed['capture_policy']['bitmap_dpi_context_requested'] == context
+            assert mixed['capture_policy']['bitmap_dpi_awareness'] == ('unaware' if context=='window' else 'per-monitor-v2')
+            physical = raw['dpi']['after']['window']['physical_window_bounds']['value']
+            logical = raw['dpi']['after']['window']['context_window_bounds']['value']
+            expected = logical if context=='window' else physical
+            assert mixed['image']['size'] == expected[2:], 'PrintWindow used the wrong coordinate dimensions'
+            assert mixed['image']['source_bounds'] == physical
+            assert mixed['root']['label'] == 'svgshot Capture Fixture'
+    finally:
+        unaware.terminate()
+        unaware.wait(timeout=10)
     assert visible['root']['label'] == 'svgshot Capture Fixture'
     assert 'PasswordHiddenSentinel' not in json.dumps(visible)
     Path('build/screen.png').write_bytes(screen.stdout)

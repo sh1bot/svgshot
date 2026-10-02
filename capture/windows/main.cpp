@@ -109,6 +109,7 @@ std::string rect_json(RECT r)
     return "[" + std::to_string(r.left) + "," + std::to_string(r.top) + "," +
            std::to_string(r.right - r.left) + "," + std::to_string(r.bottom - r.top) + "]";
 }
+#include "dpi_info.h"
 RECT bounds(HWND hwnd)
 {
     RECT r{};
@@ -1283,7 +1284,7 @@ std::string save_png(UINT width, UINT height, UINT stride, BYTE *pixels)
         throw std::runtime_error("Cannot read PNG memory stream");
     return png;
 }
-SIZE capture_printwindow(HWND hwnd, std::string &png)
+SIZE capture_printwindow(HWND hwnd, std::string &png, DPI_AWARENESS_CONTEXT selectedContext)
 {
     DWORD affinity = 0;
     if (GetWindowDisplayAffinity(hwnd, &affinity) && affinity != WDA_NONE)
@@ -1300,7 +1301,15 @@ SIZE capture_printwindow(HWND hwnd, std::string &png)
         throw std::runtime_error("Cannot create compatibility capture event");
     // PrintWindow asks only this window to paint, rather than copying desktop
     // pixels that might belong to another application. It can block a provider.
-    std::thread worker([hwnd, result] {
+    std::thread worker([hwnd, result, selectedContext] {
+        dpi_info::Context dpiContext(selectedContext);
+        if (!dpiContext.previous)
+        {
+            result->error = "Cannot set PrintWindow DPI context (Windows error " +
+                            std::to_string(GetLastError()) + ")";
+            SetEvent(result->done);
+            return;
+        }
         struct Surface
         {
             HDC dc = CreateCompatibleDC(nullptr);
@@ -1400,6 +1409,10 @@ void require_unobscured(HWND hwnd, RECT rectangle)
 }
 SIZE capture_screen(HWND hwnd, std::string &png)
 {
+    // Desktop pixel copies must retain physical coordinates, even if reached
+    // through a capture attempt using the target's virtualized DPI context.
+    dpi_info::Context physical(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (!physical.previous) throw std::runtime_error("Cannot set screen capture DPI context");
     DWORD affinity = 0;
     if (GetWindowDisplayAffinity(hwnd, &affinity) && affinity != WDA_NONE)
         throw std::runtime_error("Window excludes its content from capture");
@@ -1450,11 +1463,14 @@ SIZE capture_screen(HWND hwnd, std::string &png)
     png = save_png(w, h, w * 4, data);
     return {w, h};
 }
-SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility, bool &screenCapture)
+SIZE capture_png(HWND hwnd, std::string &png, bool &compatibility, bool &screenCapture,
+                 DPI_AWARENESS_CONTEXT selectedContext)
 {
     if (screenCapture) return capture_screen(hwnd, png);
     if (compatibility)
-        return capture_printwindow(hwnd, png);
+        return capture_printwindow(hwnd, png, selectedContext);
+    dpi_info::Context dpiContext(selectedContext);
+    if (!dpiContext.previous) throw std::runtime_error("Cannot set WGC DPI context");
     if (!capture::GraphicsCaptureSession::IsSupported())
         throw std::runtime_error("Windows Graphics Capture is unavailable on this desktop");
     com_ptr<ID3D11Device> device;
@@ -1679,6 +1695,46 @@ std::filesystem::path desktop_capture_path(HWND hwnd)
         output = desktop / (stem + L" (" + std::to_wstring(suffix) + L").png");
     return output;
 }
+bool dpi_information_self_test()
+{
+    using winrt::Windows::Data::Json::JsonObject;
+    auto initial = GetThreadDpiAwarenessContext();
+    for (auto mode : {DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+                      DPI_AWARENESS_CONTEXT_UNAWARE, DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED})
+    {
+        HWND window = nullptr;
+        {
+            dpi_info::Context context(mode);
+            window = CreateWindowExW(WS_EX_NOACTIVATE, L"STATIC", L"", WS_POPUP,
+                                     10, 10, 160, 80, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        }
+        if (!window) return false;
+        auto observed = JsonObject::Parse(winrt::to_hstring(dpi_info::read(window)));
+        UINT expected = GetDpiForWindow(window);
+        auto target = observed.GetNamedObject(L"window");
+        auto displays = observed.GetNamedArray(L"displays");
+        bool valid = target.GetNamedObject(L"dpi").GetNamedNumber(L"value") == expected &&
+                     target.GetNamedString(L"awareness") == winrt::to_hstring(dpi_info::awareness(mode)) &&
+                     displays.Size() > 0 &&
+                     AreDpiAwarenessContextsEqual(initial, GetThreadDpiAwarenessContext()) &&
+                     AreDpiAwarenessContextsEqual(mode, GetWindowDpiAwarenessContext(window));
+        valid = valid && AreDpiAwarenessContextsEqual(mode, dpi_info::bitmap_context(window,L"window")) &&
+                AreDpiAwarenessContextsEqual(initial, dpi_info::bitmap_context(window,L"application"));
+        if (mode != DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) valid = valid && expected == 96;
+        for (auto const &displayValue : displays)
+        {
+            auto display = displayValue.GetObject();
+            valid = valid && display.GetNamedObject(L"effective_dpi").GetNamedNumber(L"value") > 0;
+            if (mode == DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 && display.GetNamedBoolean(L"window_monitor"))
+                valid = valid && display.GetNamedObject(L"effective_dpi").GetNamedNumber(L"value") == expected;
+        }
+        DestroyWindow(window);
+        if (!valid) return false;
+    }
+    std::cout << "Validated per-monitor, unaware, GDI-scaled DPI capture and context restoration\n";
+    return true;
+}
+
 int wmain(int argc, wchar_t **argv)
 {
     if (argc == 2 && std::wstring(argv[1]) == L"--geometry-self-test")
@@ -1697,18 +1753,25 @@ int wmain(int argc, wchar_t **argv)
     {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
+        if (argc == 2 && std::wstring(argv[1]) == L"--dpi-self-test")
+            return dpi_information_self_test() ? 0 : 1;
         HWND hwnd = nullptr;
         std::filesystem::path outputPath;
         bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false,
              debugUnredacted = false,
              stdoutPng = false, compatibility = false, screenCapture = false;
-        std::wstring accessibilityApi = L"auto";
+        std::wstring accessibilityApi = L"auto", captureDpiContext = L"per-monitor";
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
             std::wstring arg = argv[i];
             if (arg == L"--fixture")
                 return fixture();
+            if (arg == L"--fixture-unaware")
+            {
+                dpi_info::Context context(DPI_AWARENESS_CONTEXT_UNAWARE);
+                return fixture();
+            }
             if (arg == L"--out" && i + 1 < argc)
                 outputPath = argv[++i];
             else if (arg == L"--hwnd" && i + 1 < argc)
@@ -1719,6 +1782,8 @@ int wmain(int argc, wchar_t **argv)
                 delay = std::stoi(argv[++i]);
             else if (arg == L"--accessibility-api" && i + 1 < argc)
                 accessibilityApi = argv[++i];
+            else if (arg == L"--capture-dpi-context" && i + 1 < argc)
+                captureDpiContext = argv[++i];
             else if (arg == L"--include-hidden-content")
                 includeHidden = true;
             else if (arg == L"--unredacted")
@@ -1743,6 +1808,8 @@ int wmain(int argc, wchar_t **argv)
                              "Without a filename, save a dated PNG on the Desktop. --out FILE.png "
                              "also sets the filename. --print-window uses compatibility capture.\n"
                              "--screen captures the visible area of an unobscured window.\n"
+                             "--capture-dpi-context per-monitor|window|application selects the bitmap capture "
+                             "thread context (default: per-monitor). Screen copies always use per-monitor.\n"
                              "Requires Windows 10 1903+. Use --version for the source commit.\n";
                 return 0;
             }
@@ -1765,6 +1832,8 @@ int wmain(int argc, wchar_t **argv)
             throw std::runtime_error("Delay must be between 0 and 60 seconds");
         if (accessibilityApi != L"auto" && accessibilityApi != L"uia" && accessibilityApi != L"msaa")
             throw std::runtime_error("--accessibility-api must be auto, uia, or msaa");
+        if (captureDpiContext != L"per-monitor" && captureDpiContext != L"window" && captureDpiContext != L"application")
+            throw std::runtime_error("--capture-dpi-context must be per-monitor, window, or application");
         if (debugUnredacted)
             std::cerr << "WARNING: unredacted capture may include sensitive information, including passwords and offscreen content.\n";
         if (compatibility && screenCapture) throw std::runtime_error("Choose --print-window or --screen");
@@ -1795,6 +1864,7 @@ int wmain(int argc, wchar_t **argv)
         }
         if (automaticPath) outputPath = desktop_capture_path(hwnd);
         RECT before = capture_step("Read window bounds", [&] { return bounds(hwnd); });
+        std::string dpiBefore = dpi_info::read(hwnd);
         std::shared_ptr<Snapshot> snapshot;
         std::string apiSelectionWarning;
         if (accessibilityApi == L"uia")
@@ -1843,25 +1913,41 @@ int wmain(int argc, wchar_t **argv)
         }
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
+        auto selectedDpiContext = (uiaOnly || screenCapture) ? DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                                                            : dpi_info::bitmap_context(hwnd, captureDpiContext);
+        if (!selectedDpiContext)
+            throw std::runtime_error("Cannot query requested bitmap DPI context (Windows error " +
+                                     std::to_string(GetLastError()) + ")");
         if (!uiaOnly)
-            size = capture_step("Capture window bitmap", [&] { return capture_png(hwnd, png, compatibility, screenCapture); });
+            size = capture_step("Capture window bitmap", [&] {
+                return capture_png(hwnd, png, compatibility, screenCapture, selectedDpiContext);
+            });
         RECT after = bounds(hwnd);
+        std::string dpiAfter = dpi_info::read(hwnd);
         if (!EqualRect(&before, &after))
             throw std::runtime_error("Window moved or resized during capture; try again");
         // WGC and DWM normally agree; some window frames instead match GetWindowRect.
         RECT conventional{};
         GetWindowRect(hwnd, &conventional);
-        if (size.cx == conventional.right - conventional.left &&
-            size.cy == conventional.bottom - conventional.top)
+        if ((compatibility && !screenCapture) ||
+            (size.cx == conventional.right - conventional.left &&
+             size.cy == conventional.bottom - conventional.top))
             before = conventional;
         bool mapped =
             size.cx != before.right - before.left || size.cy != before.bottom - before.top;
         std::ostringstream out;
         out << "{\"version\":2,\"screen_bounds\":" << rect_json(before) << ",\"image_size\":["
-            << size.cx << ',' << size.cy << "],\"warnings\":[";
+            << size.cx << ',' << size.cy << "],\"dpi\":{\"before\":" << dpiBefore
+            << ",\"after\":" << dpiAfter << "},\"warnings\":[";
         bool warning = false;
+        if (dpiBefore != dpiAfter)
+        {
+            out << "\"DPI information changed during capture; inspect the before and after observations.\"";
+            warning = true;
+        }
         if (screenCapture && !uiaOnly)
         {
+            if (warning) out << ',';
             out << "\"Bitmap captured from the selected window's visible screen area.\"";
             warning = true;
             std::cerr << "svgshot-capture: using visible-screen capture\n";
@@ -1928,6 +2014,11 @@ int wmain(int argc, wchar_t **argv)
             << ",\"accessibility_api_requested\":" << json(accessibilityApi)
             << ",\"collector_integrity_level\":" << collectorIntegrity
             << ",\"target_integrity_level\":" << targetIntegrity
+            << ",\"bitmap_dpi_context_requested\":" << json(captureDpiContext)
+            << ",\"bitmap_dpi_awareness\":\""
+            << (uiaOnly ? "not_captured" : dpi_info::awareness(screenCapture
+                    ? DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+                    : selectedDpiContext)) << '"'
             << ",\"accessibility_api_selected\":" << json(snapshot->provider == "windows-msaa" ? L"msaa" : L"uia")
             << ",\"actions_invoked\":false,\"bitmap_method\":\""
             << (uiaOnly ? "none" : screenCapture ? "screen" : compatibility ? "printwindow" : "wgc")

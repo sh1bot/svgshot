@@ -9,12 +9,28 @@ from unittest.mock import patch
 from PIL import Image
 
 from svgshot.output import capture_path, desktop_dir
-from svgshot.grab import main
+from svgshot.grab import main, capture_bytes
 from svgshot.snapshot import embed_snapshot, read_snapshot
 from tests.test_schema import semantic_capture
 
 
 class CaptureOutputTests(unittest.TestCase):
+    def test_windows_dpi_context_is_forwarded_and_rejected_elsewhere(self):
+        stream = io.BytesIO()
+        Image.new('RGB',(400,200),'white').save(stream,format='PNG')
+        png = embed_snapshot(stream.getvalue(),semantic_capture())
+        with patch('svgshot.grab.sys.platform','win32'), \
+             patch('svgshot.grab.helper',return_value='capture.exe'), \
+             patch('svgshot.grab.subprocess.run') as run:
+            run.return_value.stdout = png
+            for context in ('window','application'):
+                self.assertEqual(capture_bytes(capture_dpi_context=context),png)
+                self.assertEqual(run.call_args.args[0],
+                                 ['capture.exe','--stdout','--capture-dpi-context',context])
+        with patch('svgshot.grab.sys.platform','linux'):
+            with self.assertRaisesRegex(ValueError,'only on Windows'):
+                capture_bytes(capture_dpi_context='window')
+
     def test_names_are_valid_and_collisions_preserve_existing_captures(self):
         with tempfile.TemporaryDirectory() as folder:
             now = datetime(2026, 10, 1, 14, 0, 0, 123000)

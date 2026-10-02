@@ -88,6 +88,10 @@ it deliberately; the resulting PNG and SVG may contain sensitive data.
 On Windows, `--accessibility-api auto|uia|msaa` selects the accessibility source.
 The default probes MSAA when UIA is sparse or slow, and uses the first sufficiently
 detailed result.
+`--capture-dpi-context window` tries matching the Windows capture thread to the
+target window's DPI awareness; `application` uses its process's default context.
+The default is `per-monitor`. For comparison with
+the native helper's redraw path, use `--print-window --capture-dpi-context window`.
 
 ## Output and limits
 
