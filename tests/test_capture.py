@@ -48,6 +48,29 @@ def semantic_snapshot():
 
 
 class CaptureTests(unittest.TestCase):
+    def test_msaa_sloping_tabs_replace_false_buttons_and_border_ink(self):
+        s = snapshot()
+        s['root']['children'] = [element(50019,'Extended',[120,325,100,28],
+                                       framework_id='MSAA')]
+        s['root']['children'][0]['states'] = {'selected':True}
+        image = Image.new('RGB',(300,180),'#f0f0f0')
+        ImageDraw.Draw(image).polygon(((20,125),(119,125),(108,152),(31,152)),
+                                     fill='white',outline='#707070')
+        scene = Node('root',(0,0,300,180),children=[
+            Node('outlined-button',(28,130,80,32)),
+            Node('text',(35,132,72,17),text='Extended /')])
+        with patch('svgshot.capture._ocr_ui',return_value=[Node('text',(1,3,69,14),text='Extended')]):
+            merge_uia(scene,image,s)
+        nodes = list(flatten(scene))
+        tab = next(n for n in nodes if n.kind == 'tab-active')
+        self.assertIn('tab_corners',tab.vector_data)
+        self.assertFalse(any(n.kind == 'outlined-button' for n in nodes))
+        label = next(n for n in nodes if n.kind == 'text')
+        self.assertEqual(label.text,'Extended')
+        self.assertEqual(label.box[3],14)
+        svg = ET.fromstring(to_svg(scene))
+        self.assertIsNotNone(svg.find('.//{http://www.w3.org/2000/svg}path[@data-kind="tab-active"]'))
+
     def test_tab_border_ocr_does_not_become_caption_punctuation(self):
         s = snapshot()
         s['root']['children'] = [element(50019,'Standard',[120,225,100,28],framework_id='MSAA')]

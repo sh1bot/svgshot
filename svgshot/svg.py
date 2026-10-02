@@ -273,9 +273,16 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             parts.append(f'<path d="M{x+w-13} {y+h/2-2:g} l4 4 4 -4" '
                          f'fill="none" stroke="{arrow}" stroke-width="1"/>')
         elif kind in ("tab", "tab-active"):
-            parts.append(f'<rect x="{x+.5:g}" y="{y+.5:g}" width="{w-1}" height="{h-1}" '
-                         f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
-            if kind == "tab-active":
+            corners = node.vector_data.get('tab_corners')
+            if corners:
+                tl,tr,br,bl = corners
+                parts.append(f'<path data-kind="{kind}" d="M{x+tl:g} {y+.5:g} H{x+tr:g} '
+                             f'L{x+br:g} {y+h-1:g} H{x+bl:g} Z" '
+                             f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
+            else:
+                parts.append(f'<rect x="{x+.5:g}" y="{y+.5:g}" width="{w-1}" height="{h-1}" '
+                             f'fill="{node.background}" stroke="{paint}" stroke-width="1"/>')
+            if kind == "tab-active" and not corners:
                 parts.append(f'<path d="M{x+1} {y+h-1} h{w-2}" stroke="#ffffff"/>')
         elif kind in ("line", "input-underline", "column-divider"):
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{paint}"/>')

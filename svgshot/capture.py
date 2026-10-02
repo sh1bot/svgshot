@@ -239,6 +239,33 @@ def semantic_icon_boxes(image, snapshot):
     return sorted(set(boxes))
 
 
+def tab_outline(image, box):
+    """Fit sloping tab sides inside semantic bounds, away from caption ink."""
+    import numpy as np
+    x,y,w,h = box
+    if w < 30 or h < 12:
+        return {}
+    pixels = np.asarray(image.crop((x,y,x+w,y+h)).convert('RGB')).astype(float)
+    background = np.median(pixels.reshape(-1,3),axis=0)
+    edge = np.linalg.norm(pixels-background,axis=2) > 65
+    margin = min(w//3, round(h*.65))
+    corners = []
+    for rows in (range(1,4),range(h-4,h-1)):
+        left,right = [],[]
+        for row in rows:
+            a = np.flatnonzero(edge[row,:margin])
+            b = np.flatnonzero(edge[row,w-margin:])
+            if len(a): left.append(int(a[0]))
+            if len(b): right.append(int(b[0])+w-margin)
+        if not left or not right:
+            return {}
+        corners.append((float(np.median(left)),float(np.median(right))))
+    (tl,tr),(bl,br) = corners
+    if max(abs(tl-bl),abs(tr-br)) < 3:
+        return {}
+    return {'tab_corners':[tl,tr,br,bl]}
+
+
 def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     """UIA supplies exact strings/states. OCR supplies ink placement and gaps.
 
@@ -258,7 +285,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     text_boxes = [local_box(n["bounds"], snapshot) for n in items if kind(n) == "text"]
     terminals = {id(n) for n in items if n.get("class_name") == "TermControl"}
     authoritative = [local_box(n["bounds"], snapshot) for n in items
-                     if id(n) in terminals or kind(n) in {"list", "tree", "appbar", "tab", "header", "statusbar"}
+                     if id(n) in terminals or kind(n) in {"list", "tree", "appbar", "tab", "tabitem", "header", "statusbar"}
                      or kind(n) == "edit" and n.get("framework_id") == "XAML"]
     surfaces = []
     for item in items:
@@ -307,13 +334,15 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         # Cropped captions can be joined to neighbours, truncated, or prefixed
         # with OCR from an icon. Retry only inside a verified semantic region.
         if (ocr_enabled and owner.get("framework_id") == "MSAA"
-                and (not exact or any(n.box[3] > box[3]*.7 for n in exact))
+                and (kind(owner) == "tabitem" or not exact or any(n.box[3] > box[3]*.7 for n in exact))
                 and kind(owner) in {"menuitem", "headeritem", "tabitem", "treeitem", "listitem"}):
             x,y,w,h = box
             if kind(owner) == "tabitem":
-                pad = min(8, w//8)
+                pad = min(round(h*.55), w//5)
                 x += pad
                 w -= pad*2
+                y += 4
+                h -= 8
             nearby_icons = [b for b in icon_boxes if overlap(b,box)]
             if nearby_icons:
                 left = max(b[0]+b[2]+2 for b in nearby_icons)
@@ -357,7 +386,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                 matches = exact = [chosen]
                 if normalize(chosen.text).endswith("..."):
                     text = text[:len(chosen.text.rstrip(". "))].rstrip()+"…"
-            elif kind(owner) in {"listitem", "menuitem", "headeritem", "treeitem", "tabitem"}:
+            elif kind(owner) in {"listitem", "menuitem", "headeritem", "treeitem"}:
                 return  # Unverified geometry must not create captions over other ink.
         placement = exact
         ink = ink_box(image, box) if owner.get("framework_id") != "MSAA" and (kind(owner) == "text" or id(owner) in cells or kind(owner) == "treeitem") else None
@@ -437,7 +466,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         if (not titlebar_button and
                 ((role in {"button", "splitbutton", "checkbox", "radiobutton"} and native)
                 or role == "edit" and id(item) not in cells and item.get("framework_id") != "MSAA"
-                or role == "combobox" or role == "tabitem" and native)):
+                or role in {"combobox", "tabitem"})):
             x, y, w, h = box
             shape = {"button": "outlined-button", "splitbutton": "outlined-button", "edit": "outline",
                      "combobox": "dropdown", "tabitem": "tab-active" if item.get("states", {}).get("selected") else "tab"}.get(role, "outline")
@@ -450,7 +479,8 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
             else:
                 visual_box = box
             controls.append(Node(shape, visual_box, color="#505050", background=sample_color(image, visual_box),
-                                 vector_data={"source": "uia", "uia_id": item.get("id", "")}))
+                                 vector_data={"source": "uia", "uia_id": item.get("id", ""),
+                                              **(tab_outline(image,visual_box) if role == "tabitem" else {})}))
         if id(item) in terminals:
             text_nodes.extend(terminal_text(image, item, snapshot))
             continue
