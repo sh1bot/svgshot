@@ -337,7 +337,9 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         if (role in {"button", "radiobutton", "checkbox"} and item.get("name")
                 and 14 <= box[2] <= 64 and 14 <= box[3] <= 64
                 and .75 <= box[2]/box[3] <= 1.4
-                and not any(normalize(n.text) == normalize(item["name"]) for n in ocr if contains(box,n.box))):
+                and not any(normalize(n.text) == normalize(item["name"]) for n in ocr if contains(box,n.box))
+                and not any(len(n.text.strip()) > 3 and n.confidence >= .6
+                            and overlap(n.box,box) > n.box[2]*n.box[3]*.35 for n in ocr)):
             artwork.append(trace_artwork(image, box))
             suppressed.update(id(n) for n in ocr if overlap(n.box,box) > n.box[2]*n.box[3]*.35)
             continue

@@ -83,6 +83,13 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(any(n.kind == 'text' for n in flatten(scene)))
         self.assertTrue(any(n.kind == 'capture-artwork' for n in flatten(scene)))
 
+    def test_misplaced_icon_bounds_cannot_consume_a_visible_caption(self):
+        s = snapshot()
+        s['root']['children'] = [element(50000,'Close',[120,225,30,30],framework_id='MSAA')]
+        scene = Node('root',(0,0,300,180),children=[Node('text',(23,29,45,15),text='Action')])
+        merge_uia(scene,Image.new('RGB',(300,180),'white'),s)
+        self.assertIn('Action',[n.text for n in flatten(scene) if n.kind == 'text'])
+
     def test_coordinate_origin_scaling_and_clipping(self):
         s = snapshot()
         self.assertEqual(local_box([120, 225, 90, 30], s), (20, 25, 90, 30))
