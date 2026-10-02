@@ -61,6 +61,28 @@ class CaptureTests(unittest.TestCase):
         self.assertIn('Running', texts)
         self.assertNotIn('Hidden row', texts)
 
+    def test_field_ocr_does_not_duplicate_nested_breadcrumb_captions(self):
+        s = snapshot()
+        field = element(50004, 'Address bar', [110,220,280,30])
+        field['children'] = [element(50000,name,[115+index*85,225,80,20])
+                             for index,name in enumerate(('Network','files','scratch'))]
+        s['root']['children'] = [field]
+        whole = 'Network > files > scratch'
+        scene = Node('root',(0,0,300,180),children=[Node('text',(15,24,230,14),text=whole)])
+        with patch('svgshot.capture._ocr_ui', return_value=[Node('text',(0,2,230,14),text=whole,confidence=.95)]):
+            merge_uia(scene,Image.new('RGB',(300,180),'white'),s)
+        text = [n.text for n in flatten(scene) if n.kind == 'text']
+        self.assertNotIn(whole,text)
+        self.assertEqual(sorted(text),['Network','files','scratch'])
+
+    def test_square_icon_control_keeps_artwork_instead_of_ocr_letters(self):
+        s = snapshot()
+        s['root']['children'] = [element(50013,'Details',[120,225,30,30],framework_id='DirectUI')]
+        scene = Node('root',(0,0,300,180),children=[Node('text',(23,29,20,15),text='Ba')])
+        merge_uia(scene,Image.new('RGB',(300,180),'white'),s)
+        self.assertFalse(any(n.kind == 'text' for n in flatten(scene)))
+        self.assertTrue(any(n.kind == 'capture-artwork' for n in flatten(scene)))
+
     def test_coordinate_origin_scaling_and_clipping(self):
         s = snapshot()
         self.assertEqual(local_box([120, 225, 90, 30], s), (20, 25, 90, 30))

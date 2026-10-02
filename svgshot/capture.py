@@ -334,6 +334,13 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         role = kind(item)
         if item.get("password") and not item.get("debug_unredacted") or id(item) in chrome:
             continue
+        if (role in {"button", "radiobutton", "checkbox"} and item.get("name")
+                and 14 <= box[2] <= 64 and 14 <= box[3] <= 64
+                and .75 <= box[2]/box[3] <= 1.4
+                and not any(normalize(n.text) == normalize(item["name"]) for n in ocr if contains(box,n.box))):
+            artwork.append(trace_artwork(image, box))
+            suppressed.update(id(n) for n in ocr if overlap(n.box,box) > n.box[2]*n.box[3]*.35)
+            continue
         caption = str(item.get("label", item.get("name", ""))).casefold()
         titlebar_button = (role == "button" and box[1] <= 4 and box[3] <= 42
                            and box[0] >= image.width-120
@@ -450,6 +457,13 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                     suppressed.update(id(n) for n in source_nodes
                                       if overlap(n.box, box) > n.box[2]*n.box[3]*.30)
 
+    # Field-specific OCR is created after the initial OCR list. It needs the
+    # same duplicate check, including captions on nested breadcrumb controls.
+    semantic_text = [t for t in text_nodes if t.vector_data.get("source") == "uia"]
+    def duplicates_semantics(n):
+        represented = [t for t in semantic_text if overlap(n.box,t.box) and normalize(t.text) in normalize(n.text)]
+        return represented and sum(len(t.text) for t in represented) > len(n.text)*.5
+    text_nodes = [n for n in text_nodes if n.vector_data.get("source") != "ocr" or not duplicates_semantics(n)]
     for n in ocr:
         represented = [t for t in text_nodes if overlap(n.box,t.box) and normalize(t.text) in normalize(n.text)]
         if len(represented) >= 2 and sum(len(t.text) for t in represented) > len(n.text)*.5:
