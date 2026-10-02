@@ -260,6 +260,19 @@ class CaptureTests(unittest.TestCase):
         merge_uia(scene, Image.new('RGB', (300, 180)), s)
         self.assertFalse(any(n.kind == 'text' for n in flatten(scene)))
 
+    def test_debug_snapshot_can_render_value_that_is_normally_redacted(self):
+        from svgshot.schema import render_view
+        s = semantic_snapshot()
+        s['capture_policy'] = {'debug_unredacted': True}
+        s['root']['children'].append({
+            'id':'n4','role':'edit','label':'Password','bounds':[20,110,180,24],
+            'states':{'protected':True},'relationships':{},
+            'text':{'status':'not_supported','lines':[]},
+            'value':{'status':'value','value':'debug-secret'},'children':[]})
+        view = render_view(s)
+        scene = merge_uia(Node('root',(0,0,300,180)),Image.new('RGB',(300,180)),view)
+        self.assertIn('debug-secret',[n.text for n in flatten(scene) if n.kind=='text'])
+
     def test_visible_edit_text_is_recovered_from_its_own_bounds(self):
         s = snapshot()
         s['root']['children'] = [element(50004, 'Open:', [180, 220, 100, 22])]

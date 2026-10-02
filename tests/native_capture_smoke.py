@@ -56,6 +56,25 @@ if len(sys.argv)>1:
     assert streamed['root']['label']=='svgshot Capture Fixture'
     assert 'PasswordHiddenSentinel' not in json.dumps(streamed)
     print('Validated direct in-memory native PNG capture')
+    debug = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
+        '--debug-unredacted', '--stdout'], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=True, timeout=30)
+    unredacted = read_snapshot(io.BytesIO(debug.stdout))
+    validate(unredacted)
+    assert b'may include sensitive information' in debug.stderr
+    assert unredacted['capture_policy']['debug_unredacted'] is True
+    assert unredacted['capture_policy']['password_content'] == 'included'
+    assert 'PasswordHiddenSentinel' in json.dumps(unredacted)
+    assert any('may include sensitive information' in warning for warning in unredacted['warnings'])
+    for api in ('uia', 'msaa', 'auto'):
+        selected = subprocess.run(['build/capture/Release/svgshot-capture-win.exe', '--hwnd', sys.argv[1],
+            '--accessibility-api', api, '--stdout'], stdout=subprocess.PIPE,
+            check=True, timeout=30)
+        selected_snapshot = read_snapshot(io.BytesIO(selected.stdout))
+        validate(selected_snapshot)
+        assert selected_snapshot['source']['provider'] in ('windows-uia', 'windows-msaa')
+        if api != 'auto':
+            assert selected_snapshot['source']['provider'] == 'windows-' + api
     compatibility=subprocess.run(['build/capture/Release/svgshot-capture-win.exe','--hwnd',sys.argv[1],
         '--print-window','--stdout'],stdout=subprocess.PIPE,check=True,timeout=30)
     compatible=read_snapshot(io.BytesIO(compatibility.stdout))

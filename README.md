@@ -82,8 +82,12 @@ Accessibility and Screen Recording permission. Linux captures pixels directly
 on X11; Wayland requires an explicitly supplied window image. See
 [Linux capture notes](docs/linux-capture.md).
 
-By default, password content is excluded. Captures can include descriptive names
-that are not visible in the screenshot, so review captures before sharing them.
+Password content is excluded by default. `--debug-unredacted` bypasses those
+redactions, including password and offscreen content, and prints a warning. Use
+it only for debugging; the resulting PNG and SVG may contain sensitive data.
+On Windows, `--accessibility-api auto|uia|msaa` selects the accessibility source.
+The default probes MSAA when UIA returns a sparse tree and keeps whichever tree
+contains more useful detail.
 
 ## Output and limits
 

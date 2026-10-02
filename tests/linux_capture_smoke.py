@@ -52,6 +52,14 @@ else:
         all_nodes=list(nodes(snapshot['root']))
         assert any(n['states'].get('checked')=='checked' for n in all_nodes)
         assert any(n['text'].get('lines') for n in all_nodes),'Visible text ranges missing'
+        debug=subprocess.run([helper,'--window',target,'--stdout','--debug-unredacted'],
+                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+        unredacted=read_snapshot(io.BytesIO(debug.stdout));validate(unredacted)
+        assert b'may include sensitive information' in debug.stderr
+        assert unredacted['capture_policy']['debug_unredacted'] is True
+        assert unredacted['capture_policy']['password_content']=='included'
+        assert 'PasswordHiddenSentinel' in json.dumps(unredacted)
+        assert any('may include sensitive information' in warning for warning in unredacted['warnings'])
         with __import__('tempfile').TemporaryDirectory() as folder:
             path=Path(folder)/'capture.png'
             subprocess.run([helper,str(path),'--window',target],check=True)

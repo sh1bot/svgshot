@@ -52,7 +52,8 @@ def _parser():
 
 def _has_capture_options(args):
     return any((args.helper, args.hwnd, args.window, args.foreground, args.delay,
-                args.include_hidden_content, args.bitmap, args.window_bounds))
+                args.include_hidden_content, args.debug_unredacted,
+                args.accessibility_api != "auto", args.bitmap, args.window_bounds))
 
 
 def _raw_convert(data, input_path, output, args):
@@ -153,6 +154,10 @@ def main(argv=None) -> int:
         else:
             if args.paths[0].suffix.lower() != ".png":
                 raise ValueError("Input must be a PNG")
+            if args.debug_unredacted:
+                raise ValueError("--debug-unredacted requires --capture; redacted values cannot be recovered from an existing PNG")
+            if args.accessibility_api != "auto":
+                raise ValueError("--accessibility-api requires --capture")
             if _has_capture_options(args):
                 raise ValueError("Live capture options require --capture")
             input_path = args.paths[0]

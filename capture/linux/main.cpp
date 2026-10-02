@@ -252,6 +252,7 @@ struct Reader {
   Rect viewport;
   AtspiCoordType coords;
   bool include_hidden;
+  bool debug_unredacted;
   int width, height;
   J native = J::object();
   std::set<std::string> warnings;
@@ -261,8 +262,8 @@ struct Reader {
   std::vector<GPtr<AtspiAccessible>> refs;
   std::chrono::steady_clock::time_point start =
       std::chrono::steady_clock::now();
-  Reader(Rect v, AtspiCoordType c, bool h, int w, int height_value)
-      : viewport(v), coords(c), include_hidden(h), width(w),
+  Reader(Rect v, AtspiCoordType c, bool h, bool debug, int w, int height_value)
+      : viewport(v), coords(c), include_hidden(h || debug), debug_unredacted(debug), width(w),
         height(height_value) {}
   bool expired() {
     return seen.size() >= 5000 ||
@@ -353,7 +354,7 @@ struct Reader {
             for (auto name : {"invisible", "hidden"}) {
               auto v =
                   static_cast<const char *>(g_hash_table_lookup(attrs, name));
-              if (v &&
+              if (!debug_unredacted && v &&
                   (std::strcmp(v, "true") == 0 || std::strcmp(v, "1") == 0))
                 hidden = true;
             }
@@ -367,7 +368,7 @@ struct Reader {
             runs.add(line(iface.get(), offset, hi, format));
             offset = hi;
           }
-          if (hidden) {
+          if (hidden && !debug_unredacted) {
             warnings.insert("Hidden formatted text redacted");
             continue;
           }
@@ -449,7 +450,7 @@ struct Reader {
     Rect b = extents(a, coords, &bounds_record);
     raw.set("bounds", bounds_record);
     bool redacted =
-        protected_content ||
+        (protected_content && !debug_unredacted) ||
         ((offscreen || !intersects(b, viewport)) && !include_hidden);
     J children = J::array(), relations = J::object();
     J out = J::object()
@@ -545,7 +546,7 @@ struct Reader {
       }
       raw.set("relationships_status", re.p ? re.record() : obs("value"));
     }
-    if (!protected_content) {
+    if (!protected_content || debug_unredacted) {
       Error ce;
       int n = atspi_accessible_get_child_count(a, &ce.p);
       raw.set("children_status", ce.p ? ce.record() : value(n));
@@ -761,7 +762,8 @@ std::string desktop_capture_path(std::string title) {
 int main(int argc, char **argv) {
   try {
     std::string window, out, json, bitmap;
-    bool foreground = false, hidden = false, stdout_png = false, list = false;
+    bool foreground = false, hidden = false, debug_unredacted = false,
+         stdout_png = false, list = false;
     int delay = 0;
     Rect supplied{};
     bool has_bounds = false;
@@ -780,7 +782,7 @@ int main(int argc, char **argv) {
         std::cout
             << "svgshot-capture-linux [capture.png | --out capture.png | --stdout] [--window "
                "ID | --foreground] [--delay SECONDS] [--json capture.json] "
-               "[--include-hidden-content]\n  --list-windows   List "
+               "[--include-hidden-content] [--debug-unredacted]\n  --list-windows   List "
                "capture-local AT-SPI window IDs\n  --version        Report "
                "source commit\n  --bitmap PNG --window-bounds X Y W H   "
                "Explicit Wayland bitmap pairing\nWithout a filename, save a dated PNG on the Desktop.\n";
@@ -810,6 +812,8 @@ int main(int argc, char **argv) {
         stdout_png = true;
       else if (arg == "--include-hidden-content")
         hidden = true;
+      else if (arg == "--debug-unredacted")
+        debug_unredacted = true;
       else if (arg == "--list-windows")
         list = true;
       else if (!arg.empty() && arg[0] != '-' && out.empty())
@@ -819,6 +823,8 @@ int main(int argc, char **argv) {
     }
     if (delay < 0 || delay > 60)
       throw std::runtime_error("Delay must be 0–60 seconds");
+    if (debug_unredacted)
+      std::cerr << "WARNING: debug unredacted capture may include sensitive information, including passwords and offscreen content.\n";
     if (!window.empty() && foreground)
       throw std::runtime_error("Choose --window or --foreground");
     if (!list) {
@@ -893,7 +899,9 @@ int main(int argc, char **argv) {
     if (bounds[2] <= 0 || bounds[3] <= 0)
       throw std::runtime_error("Invalid capture bounds");
     Image image = bitmap.empty() ? screen_image(bounds) : load_image(bitmap);
-    Reader reader{bounds, coords, hidden, image.width, image.height};
+    Reader reader{bounds, coords, hidden, debug_unredacted, image.width, image.height};
+    if (debug_unredacted)
+      reader.warnings.insert("Debug unredacted capture may include sensitive information, including passwords and offscreen content.");
     reader.warnings.insert(
         bitmap.empty()
             ? "X11 capture records visible screen pixels; overlapping windows "
@@ -932,8 +940,9 @@ int main(int argc, char **argv) {
                               .set("source_to_image", transform))
             .set("root", root)
             .set("capture_policy", J::object()
-                                       .set("include_hidden_content", hidden)
-                                       .set("password_content", "redacted")
+                                       .set("include_hidden_content", hidden || debug_unredacted)
+                                       .set("debug_unredacted", debug_unredacted)
+                                       .set("password_content", debug_unredacted ? "included" : "redacted")
                                        .set("actions_invoked", false))
             .set("warnings", warnings)
             .set("native", J::object()

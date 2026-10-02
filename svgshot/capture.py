@@ -294,7 +294,8 @@ def merge_uia(scene, image, snapshot, language="eng"):
              for child in walk(item) if kind(child) == "edit"}
     native_caption_buttons = []
     emitted = set()
-    passwords = [local_box(n["bounds"], snapshot) for n in items if n.get("password")]
+    passwords = [local_box(n["bounds"], snapshot) for n in items
+                 if n.get("password") and not n.get("debug_unredacted")]
 
     def emit(text, box, owner, centered=False):
         text = text.strip("\r\n")
@@ -349,7 +350,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
     for item in items:
         box = local_box(item["bounds"], snapshot)
         role = kind(item)
-        if item.get("password") or id(item) in chrome:
+        if item.get("password") and not item.get("debug_unredacted") or id(item) in chrome:
             continue
         caption = str(item.get("label", item.get("name", ""))).casefold()
         titlebar_button = (role == "button" and box[1] <= 4 and box[3] <= 42
@@ -441,7 +442,7 @@ def merge_uia(scene, image, snapshot, language="eng"):
             value = str(item["states"]["value"])
             if "\n" not in value and "\r" not in value:
                 emit(value, (x+4, y+2, max(1, w-8), max(1, h-4)), item)
-        elif role == "edit" and not item.get("password"):
+        elif role == "edit" and (not item.get("password") or item.get("debug_unredacted")):
             # UIA may expose the edit control but omit its ValuePattern. If
             # full-window OCR saw ink in the field, retry just that visible
             # region so an adjacent label cannot consume the whole OCR line.
@@ -525,7 +526,7 @@ def describe(item):
     if item.get("password"):
         pieces.append("password field")
     states = item.get("states", {})
-    if not item.get("password"):
+    if not item.get("password") or item.get("debug_unredacted"):
         for key in ("value", "range_value"):
             if key in states and str(states[key]) != item.get("name"):
                 pieces.append(str(states[key]))
@@ -582,7 +583,7 @@ def semantic_svg(scene, snapshot, font_family="auto"):
                          f'data-uia-id="{escape(item.get("id", ""), quote=True)}" data-uia-role="{kind(item)}">')
             parts.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#000000" fill-opacity="0" aria-hidden="true"/>')
             # UIA text ranges may carry document content absent from Name/Value.
-            if not item.get("password"):
+            if not item.get("password") or item.get("debug_unredacted"):
                 for line in item.get("text_ranges", []):
                     text = line.get("text", "")
                     if (text.strip() and normalize(text) != normalize(item.get("name", ""))
@@ -611,7 +612,7 @@ def accessible_html(svg, snapshot):
         children = "".join(outline(n) for n in item.get("children", []))
         label = escape(describe(item))
         lines = ""
-        if not item.get("password"):
+        if not item.get("password") or item.get("debug_unredacted"):
             lines = "".join('<li>'+escape(line.get("text", ""))+'</li>'
                              for line in item.get("text_ranges", [])
                              if line.get("text", "").strip()
@@ -652,6 +653,10 @@ def main(argv=None):
     parser.add_argument("--config", type=Path)
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--include-hidden-content", action="store_true", help="Opt in to offscreen UIA content and full values; may include private data")
+    parser.add_argument("--debug-unredacted", action="store_true",
+                        help="Debug only: include content normally redacted, including passwords; may capture sensitive information")
+    parser.add_argument("--accessibility-api", choices=("auto", "uia", "msaa"), default="auto",
+                        help="Windows accessibility source (default: choose the richer UIA/MSAA tree)")
     parser.add_argument("--allow-raster", action="store_true", help="Opt in to the existing small-raster fallback")
     parser.add_argument("--scene", type=Path)
     parser.add_argument("--html", type=Path, help="Accessible HTML preview with inline SVG and a text outline")
@@ -661,7 +666,8 @@ def main(argv=None):
             raise ValueError("Output must have an .svg extension")
         if not 0 <= args.delay <= 60 or (args.hwnd and args.foreground):
             raise ValueError("Delay must be 0–60; choose --hwnd or --foreground")
-        if args.image and (args.hwnd or args.foreground or args.delay or args.helper or args.include_hidden_content):
+        if args.image and (args.hwnd or args.foreground or args.delay or args.helper or args.include_hidden_content
+                           or args.debug_unredacted or args.accessibility_api != "auto"):
             raise ValueError("Window selection options do not apply to replay")
         args.output.parent.mkdir(parents=True, exist_ok=True)
         if args.image:
@@ -674,6 +680,10 @@ def main(argv=None):
             command = [native_helper(args.helper), "--out", str(image_path.resolve())]
             if args.include_hidden_content:
                 command += ["--include-hidden-content"]
+            if args.debug_unredacted:
+                command += ["--debug-unredacted"]
+            if args.accessibility_api != "auto":
+                command += ["--accessibility-api", args.accessibility_api]
             if args.hwnd:
                 command += ["--hwnd", args.hwnd]
             if args.foreground:

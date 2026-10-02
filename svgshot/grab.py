@@ -34,7 +34,8 @@ def helper(platform, explicit=None):
 
 
 def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=False, delay=0,
-                  include_hidden_content=False, bitmap=None, window_bounds=None):
+                  include_hidden_content=False, debug_unredacted=False,
+                  accessibility_api="auto", bitmap=None, window_bounds=None):
     if not 0 <= delay <= 60:
         raise ValueError('Delay must be 0–60 seconds')
     if sys.platform == 'win32':
@@ -49,14 +50,18 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
             command += ['--delay', str(delay)]
         if include_hidden_content:
             command += ['--include-hidden-content']
+        if debug_unredacted:
+            command += ['--debug-unredacted']
+        if accessibility_api != 'auto':
+            command += ['--accessibility-api', accessibility_api]
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+60)
         png = result.stdout
         snapshot = read_snapshot(io.BytesIO(png))
     elif sys.platform == 'darwin':
         if hwnd or bitmap or window_bounds:
             raise ValueError('Windows/Linux options are not applicable on macOS')
-        if include_hidden_content:
-            raise ValueError('macOS currently supports visible-content capture only')
+        if include_hidden_content and not debug_unredacted:
+            raise ValueError('macOS currently supports visible-content capture only; use --debug-unredacted to bypass redactions')
         command = [helper(sys.platform, native_helper), '--framed']
         if window is not None:
             command += ['--window', str(window)]
@@ -64,6 +69,10 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
             command += ['--foreground']
         if delay:
             command += ['--delay', str(delay)]
+        if debug_unredacted:
+            command += ['--debug-unredacted']
+        if accessibility_api != 'auto':
+            raise ValueError('--accessibility-api is currently available only on Windows')
         result = subprocess.run(command, stdout=subprocess.PIPE, check=True, timeout=delay+90)
         # Native Swift worker returns JSON followed by PNG, prefixed by JSON length.
         import struct
@@ -86,6 +95,10 @@ def capture_bytes(*, native_helper=None, hwnd=None, window=None, foreground=Fals
             command += ['--delay', str(delay)]
         if include_hidden_content:
             command += ['--include-hidden-content']
+        if debug_unredacted:
+            command += ['--debug-unredacted']
+        if accessibility_api != 'auto':
+            raise ValueError('--accessibility-api is currently available only on Windows')
         if bitmap:
             command += ['--bitmap', str(bitmap)]
         if window_bounds:
@@ -111,6 +124,10 @@ def add_options(parser):
     parser.add_argument('--foreground', action='store_true')
     parser.add_argument('--delay', type=int, default=0)
     parser.add_argument('--include-hidden-content', action='store_true')
+    parser.add_argument('--debug-unredacted', action='store_true',
+                        help='Debug only: include content normally redacted, including passwords; may capture sensitive information')
+    parser.add_argument('--accessibility-api', choices=('auto', 'uia', 'msaa'), default='auto',
+                        help='Windows accessibility source (default: choose the richer UIA/MSAA tree)')
     parser.add_argument('--bitmap', type=Path, help='Linux: explicitly pair a window bitmap with the selected AT-SPI window')
     parser.add_argument('--window-bounds', type=float, nargs=4, metavar=('X','Y','W','H'),
                         help='Linux: source bounds represented by --bitmap')
@@ -120,6 +137,8 @@ def options(args):
     return dict(native_helper=args.helper, hwnd=args.hwnd, window=args.window,
                 foreground=args.foreground, delay=args.delay,
                 include_hidden_content=args.include_hidden_content,
+                debug_unredacted=args.debug_unredacted,
+                accessibility_api=args.accessibility_api,
                 bitmap=args.bitmap, window_bounds=args.window_bounds)
 
 

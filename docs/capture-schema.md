@@ -26,7 +26,7 @@ not supported.
 | Field | Meaning |
 |---|---|
 | `format`, `version` | Format identifier and integer schema version |
-| `source` | `platform` and `provider`; providers currently `windows-uia`, `macos-ax`, `linux-atspi` |
+| `source` | `platform` and `provider`; providers currently `windows-uia`, `windows-msaa`, `macos-ax`, `linux-atspi` |
 | `image` | Pixel dimensions, canonical coordinate space, and optional source-coordinate mapping |
 | `root` | Selected window's semantic tree |
 | `native` | Provider-tagged, privacy-filtered native metadata |

@@ -1,6 +1,7 @@
 // UI Automation + Windows Graphics Capture + WIC PNG, with vendored miniz.
 #include <windows.h>
 #include <ole2.h>
+#include <oleacc.h>
 #include <richedit.h>
 #include <shlobj.h>
 #include <cwctype>
@@ -15,6 +16,7 @@
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -509,7 +511,9 @@ struct Reader
     std::unique_ptr<UiaData> data;
     RECT viewport{};
     bool include_hidden = false;
-    Reader(RECT area, bool allow_hidden) : viewport(area), include_hidden(allow_hidden)
+    bool debug_unredacted = false;
+    Reader(RECT area, bool allow_hidden, bool debug)
+        : viewport(area), include_hidden(allow_hidden || debug), debug_unredacted(debug)
     {
         check_hresult(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
                                        IID_PPV_ARGS(automation.put())));
@@ -607,7 +611,7 @@ struct Reader
                 out << static_cast<int>(value);
             }
         }
-        if (!password && !redact_content)
+        if ((!password || debug_unredacted) && !redact_content)
         {
             if (auto p = pattern<IUIAutomationValuePattern>(e, UIA_ValuePatternId))
             {
@@ -638,16 +642,19 @@ struct Reader
             }
         }
         std::string text_status = "{\"status\":\"redacted\"}";
-        auto lines = password || redact_content ? "[]" : text_ranges(e, *data, text_status);
-        out << "},\"properties\":" << data->read_properties(e, password, hidden, include_hidden)
+        auto lines = (password && !debug_unredacted) || redact_content
+                         ? "[]"
+                         : text_ranges(e, *data, text_status);
+        out << "},\"properties\":" << data->read_properties(
+                   e, password, hidden, include_hidden, debug_unredacted)
             << ",\"patterns\":" << data->read_patterns(e) << ",\"text_ranges\":" << lines
             << ",\"text_capture\":" << text_status << ",\"text_selection\":"
-            << (password || redact_content ? "{\"status\":\"redacted\"}"
+            << ((password && !debug_unredacted) || redact_content ? "{\"status\":\"redacted\"}"
                                            : text_selection(e, *data, include_hidden))
             << ",\"children\":[";
         com_ptr<IUIAutomationElement> child;
         HRESULT children_hr = S_OK;
-        if (!password)
+        if (!password || debug_unredacted)
             children_hr = walker->GetFirstChildElement(e, child.put());
         bool comma = false;
         while (child && count < 5000)
@@ -673,7 +680,9 @@ struct Reader
 struct Snapshot
 {
     HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    std::string root, error, property_names, pattern_names;
+    std::string root, error, property_names, pattern_names, provider = "windows-uia";
+    std::vector<std::string> warnings;
+    int count = 0;
     bool text_truncated = false;
     bool truncated = false;
     ~Snapshot()
@@ -681,15 +690,15 @@ struct Snapshot
         CloseHandle(done);
     }
 };
-std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden)
+std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden, bool debug_unredacted)
 {
     auto result = std::make_shared<Snapshot>();
-    std::thread worker([hwnd, result, include_hidden] {
+    std::thread worker([hwnd, result, include_hidden, debug_unredacted] {
         try
         {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             {
-                Reader reader(bounds(hwnd), include_hidden);
+                Reader reader(bounds(hwnd), include_hidden, debug_unredacted);
                 com_ptr<IUIAutomationElement> root;
                 check_step(reader.automation->ElementFromHandle(hwnd, root.put()),
                            "UIA ElementFromHandle");
@@ -720,6 +729,215 @@ std::shared_ptr<Snapshot> read_uia(HWND hwnd, bool include_hidden)
     if (!result->error.empty())
         throw std::runtime_error(result->error);
     return result;
+}
+
+int msaa_control_type(const VARIANT &role)
+{
+    if (role.vt != VT_I4)
+        return UIA_CustomControlTypeId;
+    switch (role.lVal)
+    {
+    case ROLE_SYSTEM_WINDOW: return UIA_WindowControlTypeId;
+    case ROLE_SYSTEM_CLIENT: return UIA_PaneControlTypeId;
+    case ROLE_SYSTEM_PUSHBUTTON: return UIA_ButtonControlTypeId;
+    case ROLE_SYSTEM_CHECKBUTTON: return UIA_CheckBoxControlTypeId;
+    case ROLE_SYSTEM_RADIOBUTTON: return UIA_RadioButtonControlTypeId;
+    case ROLE_SYSTEM_COMBOBOX: return UIA_ComboBoxControlTypeId;
+    case ROLE_SYSTEM_TEXT: case ROLE_SYSTEM_STATICTEXT: return UIA_TextControlTypeId;
+    case ROLE_SYSTEM_EDIT: return UIA_EditControlTypeId;
+    case ROLE_SYSTEM_LINK: return UIA_HyperlinkControlTypeId;
+    case ROLE_SYSTEM_LIST: return UIA_ListControlTypeId;
+    case ROLE_SYSTEM_LISTITEM: return UIA_ListItemControlTypeId;
+    case ROLE_SYSTEM_OUTLINE: return UIA_TreeControlTypeId;
+    case ROLE_SYSTEM_OUTLINEITEM: return UIA_TreeItemControlTypeId;
+    case ROLE_SYSTEM_MENUPOPUP: return UIA_MenuControlTypeId;
+    case ROLE_SYSTEM_MENUITEM: return UIA_MenuItemControlTypeId;
+    case ROLE_SYSTEM_MENUBAR: return UIA_MenuBarControlTypeId;
+    case ROLE_SYSTEM_TOOLBAR: return UIA_ToolBarControlTypeId;
+    case ROLE_SYSTEM_TAB: return UIA_TabControlTypeId;
+    case ROLE_SYSTEM_PAGETAB: return UIA_TabItemControlTypeId;
+    case ROLE_SYSTEM_PROGRESSBAR: return UIA_ProgressBarControlTypeId;
+    case ROLE_SYSTEM_SLIDER: return UIA_SliderControlTypeId;
+    case ROLE_SYSTEM_SCROLLBAR: return UIA_ScrollBarControlTypeId;
+    case ROLE_SYSTEM_SEPARATOR: return UIA_SeparatorControlTypeId;
+    case ROLE_SYSTEM_TABLE: return UIA_TableControlTypeId;
+    case ROLE_SYSTEM_ROW: return UIA_DataItemControlTypeId;
+    case ROLE_SYSTEM_COLUMNHEADER: case ROLE_SYSTEM_ROWHEADER: return UIA_HeaderItemControlTypeId;
+    default: return UIA_CustomControlTypeId;
+    }
+}
+
+std::string read_msaa_node(IAccessible *accessible, VARIANT child, RECT viewport,
+                           bool include_hidden, bool debug_unredacted, int depth,
+                           int &count, bool &truncated)
+{
+    if (++count > 5000 || depth > 64)
+    {
+        truncated = true;
+        return "null";
+    }
+    VARIANT name, value, role, state;
+    VariantInit(&name); VariantInit(&value); VariantInit(&role); VariantInit(&state);
+    HRESULT name_hr = accessible->get_accName(child, &name.bstrVal);
+    if (SUCCEEDED(name_hr)) name.vt = VT_BSTR;
+    HRESULT value_hr = accessible->get_accValue(child, &value.bstrVal);
+    if (SUCCEEDED(value_hr)) value.vt = VT_BSTR;
+    HRESULT role_hr = accessible->get_accRole(child, &role);
+    HRESULT state_hr = accessible->get_accState(child, &state);
+    LONG x = 0, y = 0, w = 0, h = 0;
+    HRESULT bounds_hr = accessible->accLocation(&x, &y, &w, &h, child);
+    RECT box{x, y, x + std::max<LONG>(0, w), y + std::max<LONG>(0, h)}, intersection{};
+    bool offscreen = FAILED(bounds_hr) || w <= 0 || h <= 0 ||
+                     !IntersectRect(&intersection, &box, &viewport);
+    bool protected_content = role_hr == S_OK && role.vt == VT_I4 &&
+                             role.lVal == ROLE_SYSTEM_TEXT && state_hr == S_OK &&
+                             state.vt == VT_I4 && (state.lVal & STATE_SYSTEM_PROTECTED);
+    bool redact = (offscreen && !include_hidden) || (protected_content && !debug_unredacted);
+    std::wstring name_text = name.vt == VT_BSTR && name.bstrVal ? name.bstrVal : L"";
+    std::wstring value_text = value.vt == VT_BSTR && value.bstrVal ? value.bstrVal : L"";
+    std::wstring role_text;
+    if (role.vt == VT_I4)
+    {
+        wchar_t buffer[128]{};
+        UINT length = GetRoleTextW(static_cast<DWORD>(role.lVal), buffer, ARRAYSIZE(buffer));
+        if (length) role_text.assign(buffer, length);
+    }
+    else if (role.vt == VT_BSTR && role.bstrVal)
+        role_text = role.bstrVal;
+    std::string id = "msaa-" + std::to_string(count);
+    std::string result = "{\"id\":" + json(std::wstring(id.begin(), id.end())) +
+        ",\"control_type\":" + std::to_string(role_hr == S_OK ? msaa_control_type(role) : UIA_CustomControlTypeId) +
+        ",\"bounds\":" + rect_json(box) + ",\"name\":" + json(redact ? L"" : name_text) +
+        ",\"localized_control_type\":" + json(role_text) + ",\"class_name\":\"IAccessible\",\"framework_id\":\"MSAA\"" +
+        ",\"enabled\":" + std::string(state.vt == VT_I4 && !(state.lVal & STATE_SYSTEM_UNAVAILABLE) ? "true" : "false") +
+        ",\"offscreen\":" + (offscreen ? "true" : "false") +
+        ",\"password\":" + (protected_content ? "true" : "false") +
+        ",\"content_redacted\":" + (redact ? "true" : "false") +
+        ",\"states\":{\"selected\":" + std::string(state.vt == VT_I4 && (state.lVal & STATE_SYSTEM_SELECTED) ? "true" : "false");
+    if (state.vt == VT_I4 && (state.lVal & STATE_SYSTEM_FOCUSED)) result += ",\"keyboard_focus\":true";
+    if (state.vt == VT_I4 && (state.lVal & STATE_SYSTEM_FOCUSABLE)) result += ",\"focusable\":true";
+    if (value.vt == VT_BSTR && (debug_unredacted || include_hidden) && !redact)
+        result += ",\"value\":" + json(value_text);
+    result += "},\"properties\":{\"30005\":{";
+    if (name_hr == S_OK && !redact)
+        result += "\"status\":\"value\",\"type\":8,\"value\":" + json(name_text);
+    else
+        result += "\"status\":\"redacted\"";
+    result += "},\"30093\":{";
+    if (value_hr == S_OK && (debug_unredacted || include_hidden) && !redact)
+        result += "\"status\":\"value\",\"type\":8,\"value\":" + json(value_text);
+    else
+        result += "\"status\":\"redacted\",\"reason\":\"potential_hidden_content\"";
+    result += "}},\"text_ranges\":[],\"text_capture\":{\"status\":\"not_supported\"},\"text_selection\":{\"status\":\"not_supported\"},\"children\":[";
+    LONG child_count = 0;
+    HRESULT child_count_hr = accessible->get_accChildCount(&child_count);
+    if (child_count_hr == S_OK && child_count > 0 && (!protected_content || debug_unredacted))
+    {
+        LONG amount = std::min<LONG>(child_count, 5000);
+        std::vector<VARIANT> children(amount);
+        for (auto &v : children) VariantInit(&v);
+        LONG obtained = 0;
+        HRESULT children_hr = AccessibleChildren(accessible, 0, amount, children.data(), &obtained);
+        if (SUCCEEDED(children_hr))
+        {
+            for (LONG i = 0; i < obtained && count < 5000; ++i)
+            {
+                std::string child_json;
+                if (children[i].vt == VT_DISPATCH && children[i].pdispVal)
+                {
+                    com_ptr<IAccessible> child_accessible;
+                    if (SUCCEEDED(children[i].pdispVal->QueryInterface(IID_PPV_ARGS(child_accessible.put()))))
+                    {
+                        VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
+                        child_json = read_msaa_node(child_accessible.get(), self, viewport, include_hidden,
+                                                    debug_unredacted, depth + 1, count, truncated);
+                    }
+                }
+                else if (children[i].vt == VT_I4)
+                    child_json = read_msaa_node(accessible, children[i], viewport, include_hidden,
+                                                debug_unredacted, depth + 1, count, truncated);
+                if (!child_json.empty() && child_json != "null")
+                {
+                    if (result.back() != '[') result += ',';
+                    result += child_json;
+                }
+                VariantClear(&children[i]);
+            }
+        }
+        else
+            truncated = true;
+        if (child_count > amount) truncated = true;
+    }
+    result += "],\"children_status\":{\"status\":\"" +
+              std::string(child_count_hr == S_OK ? "value" : "error") + "\"}}";
+    VariantClear(&name); VariantClear(&value); VariantClear(&role); VariantClear(&state);
+    return result;
+}
+
+std::shared_ptr<Snapshot> read_msaa(HWND hwnd, bool include_hidden, bool debug_unredacted,
+                                   RECT viewport)
+{
+    auto result = std::make_shared<Snapshot>();
+    result->provider = "windows-msaa";
+    result->property_names = "{\"30005\":\"Name\",\"30093\":\"LegacyIAccessiblePattern.Value\"}";
+    result->pattern_names = "{}";
+    std::thread worker([hwnd, result, include_hidden, debug_unredacted, viewport] {
+        try
+        {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            com_ptr<IAccessible> root;
+            HRESULT hr = AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible,
+                                                     root.put_void());
+            if (FAILED(hr) || !root)
+                hr = AccessibleObjectFromWindow(hwnd, OBJID_WINDOW, IID_IAccessible,
+                                                root.put_void());
+            if (FAILED(hr) || !root)
+                throw std::runtime_error("AccessibleObjectFromWindow returned no IAccessible object");
+            VARIANT self; VariantInit(&self); self.vt = VT_I4; self.lVal = CHILDID_SELF;
+            result->root = read_msaa_node(root.get(), self, viewport, include_hidden,
+                                          debug_unredacted, 0, result->count, result->truncated);
+            winrt::uninit_apartment();
+        }
+        catch (const winrt::hresult_error &e)
+        {
+            result->error = hresult_message(e);
+        }
+        catch (const std::exception &e)
+        {
+            result->error = e.what();
+        }
+        SetEvent(result->done);
+    });
+    if (WaitForSingleObject(result->done, 20000) != WAIT_OBJECT_0)
+    {
+        worker.detach();
+        throw std::runtime_error("MSAA provider did not respond within 20 seconds");
+    }
+    worker.join();
+    if (!result->error.empty())
+        throw std::runtime_error(result->error);
+    return result;
+}
+
+int accessibility_score(const std::string &raw)
+{
+    using namespace winrt::Windows::Data::Json;
+    auto root = JsonObject::Parse(winrt::to_hstring(raw));
+    std::function<int(JsonObject)> visit = [&](JsonObject n) {
+        int score = 0;
+        int type = static_cast<int>(n.GetNamedNumber(L"control_type", UIA_CustomControlTypeId));
+        auto name = n.GetNamedString(L"name", L"");
+        if (!name.empty() && type != UIA_WindowControlTypeId && type != UIA_PaneControlTypeId)
+            score += 3;
+        if (type == UIA_TextControlTypeId || type == UIA_EditControlTypeId)
+            score += 1;
+        for (auto line : n.GetNamedArray(L"text_ranges", winrt::Windows::Data::Json::JsonArray()))
+            if (!line.GetObject().GetNamedString(L"text", L"").empty()) score += 4;
+        for (auto child : n.GetNamedArray(L"children", JsonArray()))
+            score += visit(child.GetObject());
+        return score;
+    };
+    return visit(root);
 }
 
 // Picker freezes the desktop visually, so its click cannot activate a target control.
@@ -1282,7 +1500,9 @@ int wmain(int argc, wchar_t **argv)
         HWND hwnd = nullptr;
         std::filesystem::path outputPath;
         bool uiaOnly = false, foreground = false, jsonExport = false, includeHidden = false,
+             debugUnredacted = false,
              stdoutPng = false, compatibility = false, screenCapture = false;
+        std::wstring accessibilityApi = L"auto";
         int delay = 0;
         for (int i = 1; i < argc; ++i)
         {
@@ -1297,8 +1517,12 @@ int wmain(int argc, wchar_t **argv)
                 foreground = true;
             else if (arg == L"--delay" && i + 1 < argc)
                 delay = std::stoi(argv[++i]);
+            else if (arg == L"--accessibility-api" && i + 1 < argc)
+                accessibilityApi = argv[++i];
             else if (arg == L"--include-hidden-content")
                 includeHidden = true;
+            else if (arg == L"--debug-unredacted")
+                debugUnredacted = true;
             else if (arg == L"--stdout")
                 stdoutPng = true;
             else if (arg == L"--print-window")
@@ -1312,7 +1536,8 @@ int wmain(int argc, wchar_t **argv)
             else if (arg == L"--help")
             {
                 std::cout << "svgshot-capture [FILE.png] [--hwnd NUMBER | --foreground --delay "
-                             "SECONDS] [--json] [--uia-only] [--include-hidden-content]\nSelect a "
+                             "SECONDS] [--json] [--uia-only] [--include-hidden-content] "
+                             "[--debug-unredacted] [--accessibility-api auto|uia|msaa]\nSelect a "
                              "window by clicking it; Esc "
                              "cancels. "
                              "Without a filename, save a dated PNG on the Desktop. --out FILE.png "
@@ -1338,6 +1563,10 @@ int wmain(int argc, wchar_t **argv)
             throw std::runtime_error("--stdout cannot be combined with file output options");
         if (delay < 0 || delay > 60)
             throw std::runtime_error("Delay must be between 0 and 60 seconds");
+        if (accessibilityApi != L"auto" && accessibilityApi != L"uia" && accessibilityApi != L"msaa")
+            throw std::runtime_error("--accessibility-api must be auto, uia, or msaa");
+        if (debugUnredacted)
+            std::cerr << "WARNING: debug unredacted capture may include sensitive information, including passwords and offscreen content.\n";
         if (compatibility && screenCapture) throw std::runtime_error("Choose --print-window or --screen");
         if (hwnd && foreground)
             throw std::runtime_error("Choose --hwnd or --foreground");
@@ -1356,9 +1585,54 @@ int wmain(int argc, wchar_t **argv)
             throw std::runtime_error("Target is missing or minimized");
         if (automaticPath) outputPath = desktop_capture_path(hwnd);
         RECT before = capture_step("Read window bounds", [&] { return bounds(hwnd); });
-        auto snapshot = capture_step("Read UI Automation", [&] {
-            return read_uia(hwnd, includeHidden);
-        });
+        std::shared_ptr<Snapshot> snapshot;
+        std::string apiSelectionWarning;
+        if (accessibilityApi == L"uia")
+            snapshot = capture_step("Read UI Automation", [&] {
+                return read_uia(hwnd, includeHidden, debugUnredacted);
+            });
+        else if (accessibilityApi == L"msaa")
+            snapshot = capture_step("Read Microsoft Active Accessibility", [&] {
+                return read_msaa(hwnd, includeHidden || debugUnredacted, debugUnredacted, before);
+            });
+        else
+        {
+            std::shared_ptr<Snapshot> uia, msaa;
+            std::string uiaError, msaaError;
+            try { uia = read_uia(hwnd, includeHidden, debugUnredacted); }
+            catch (const std::exception &e) { uiaError = e.what(); }
+            int us = uia ? accessibility_score(uia->root) : -1;
+            // Most modern UIA trees need no legacy probe. Try MSAA when UIA
+            // failed or exposes too few named elements to describe the window.
+            if (!uia || us < 12)
+            {
+                try { msaa = read_msaa(hwnd, includeHidden || debugUnredacted, debugUnredacted, before); }
+                catch (const std::exception &e) { msaaError = e.what(); }
+            }
+            if (!uia && !msaa)
+                throw std::runtime_error("Both UIA and MSAA failed (UIA: " + uiaError + "; MSAA: " + msaaError + ")");
+            if (uia && msaa)
+            {
+                int ms = accessibility_score(msaa->root);
+                snapshot = ms > us ? msaa : uia;
+                apiSelectionWarning = "Automatic accessibility API selection chose " +
+                    (snapshot == msaa ? std::string("MSAA") : std::string("UIA")) +
+                    " (UIA score " + std::to_string(us) + ", MSAA score " + std::to_string(ms) + ").";
+                std::cerr << "svgshot-capture: " << apiSelectionWarning << "\n";
+            }
+            else if (uia)
+            {
+                snapshot = uia;
+                apiSelectionWarning = msaaError.empty()
+                    ? "Automatic accessibility API selection used UIA because its tree was sufficiently detailed."
+                    : "Automatic accessibility API selection used UIA; MSAA failed: " + msaaError;
+            }
+            else
+            {
+                snapshot = msaa;
+                apiSelectionWarning = "Automatic accessibility API selection used MSAA because UIA failed: " + uiaError;
+            }
+        }
         SIZE size{before.right - before.left, before.bottom - before.top};
         std::string png;
         if (!uiaOnly)
@@ -1394,7 +1668,9 @@ int wmain(int argc, wchar_t **argv)
         if (snapshot->truncated)
         {
             if (warning) out << ',';
-            out << "\"UIA tree truncated at 5000 elements or 64 levels\"";
+            out << json(std::wstring(snapshot->provider == "windows-msaa"
+                ? L"MSAA tree truncated at 5000 elements or 64 levels"
+                : L"UIA tree truncated at 5000 elements or 64 levels"));
             warning = true;
         }
         if (snapshot->text_truncated)
@@ -1410,6 +1686,19 @@ int wmain(int argc, wchar_t **argv)
                 out << ',';
             out << "\"Capture size differs from window bounds; coordinates require scaling. "
                    "Inspect the result.\"";
+            warning = true;
+        }
+        if (!apiSelectionWarning.empty())
+        {
+            if (warning) out << ',';
+            out << json(std::wstring(apiSelectionWarning.begin(), apiSelectionWarning.end()));
+            warning = true;
+        }
+        if (debugUnredacted)
+        {
+            if (warning) out << ',';
+            out << "\"Debug unredacted capture may include sensitive information, including passwords and offscreen content.\"";
+            warning = true;
         }
         out << "],\"property_names\":" << snapshot->property_names
             << ",\"pattern_names\":" << snapshot->pattern_names
@@ -1419,13 +1708,18 @@ int wmain(int argc, wchar_t **argv)
                "\"max_format_runs_per_element\":2048,\"max_selections_per_element\":256,\"max_"
                "string_characters\":65536,"
                "\"timeout_seconds\":20,\"custom_properties\":\"not_discovered\","
-               "\"password_content\":\"redacted\",\"actions_invoked\":false,\"bitmap_method\":\""
+               "\"password_content\":\""
+            << (debugUnredacted ? "included" : "redacted")
+            << "\",\"debug_unredacted\":" << (debugUnredacted ? "true" : "false")
+            << ",\"accessibility_api_requested\":" << json(accessibilityApi)
+            << ",\"accessibility_api_selected\":" << json(snapshot->provider == "windows-msaa" ? L"msaa" : L"uia")
+            << ",\"actions_invoked\":false,\"bitmap_method\":\""
             << (uiaOnly ? "none" : screenCapture ? "screen" : compatibility ? "printwindow" : "wgc")
             << "\",\"include_hidden_"
                "content\":"
-            << (includeHidden ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
+            << (includeHidden || debugUnredacted ? "true" : "false") << "},\"root\":" << snapshot->root << "}\n";
         auto normalized = capture_step("Normalize UI Automation snapshot", [&] {
-            return unified::normalize(out.str());
+            return unified::normalize(out.str(), snapshot->provider);
         });
         if (!uiaOnly)
         {

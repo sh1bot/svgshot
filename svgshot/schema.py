@@ -50,6 +50,7 @@ def render_view(snapshot):
         return snapshot
     validate(snapshot)
     size = snapshot['image']['size']
+    debug_unredacted = snapshot.get('capture_policy', {}).get('debug_unredacted', False)
     def line(t):
         return {'text': t.get('content', ''), 'rectangles': t.get('rectangles', []),
                 'style': t.get('style', {}), 'format_runs': {'ranges': [line(r) for r in t.get('runs', [])]}}
@@ -71,6 +72,7 @@ def render_view(snapshot):
                 'control_element': True, 'content_element': True,
                 'class_name': n.get('hints', {}).get('class', ''), 'framework_id': n.get('hints', {}).get('toolkit', ''),
                 'text_ranges': [line(t) for t in n.get('text', {}).get('lines', [])],
+                'debug_unredacted': debug_unredacted,
                 **n.get('shortcuts', {}), 'children': [node(c) for c in n.get('children', [])]}
     return {'_renderer_view': True, 'image_size': size, 'screen_bounds': [0, 0, *size], 'root': node(snapshot['root']),
             'warnings': snapshot.get('warnings', [])}

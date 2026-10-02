@@ -195,7 +195,7 @@ struct UiaData
                '}';
     }
     std::string read_properties(IUIAutomationElement *e, bool password, bool hidden,
-                                bool include_hidden)
+                                bool include_hidden, bool debug_unredacted)
     {
         std::string out = "{";
         bool comma = false;
@@ -222,7 +222,7 @@ struct UiaData
             }
             // Value/Legacy value may reveal password contents. Other unknown
             // provider-specific fields are not probed on a password element.
-            if (password && id != UIA_NamePropertyId && id != UIA_ControlTypePropertyId &&
+            if (password && !debug_unredacted && id != UIA_NamePropertyId && id != UIA_ControlTypePropertyId &&
                 id != UIA_IsPasswordPropertyId && id != UIA_BoundingRectanglePropertyId &&
                 id != UIA_IsEnabledPropertyId && id != UIA_HasKeyboardFocusPropertyId &&
                 id != UIA_IsKeyboardFocusablePropertyId && id != UIA_IsOffscreenPropertyId)

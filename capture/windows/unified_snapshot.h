@@ -102,7 +102,7 @@ struct Builder
         o.Insert(L"runs", runs);
         return o;
     }
-    JsonObject node(JsonObject n, JsonObject propertyNames)
+    JsonObject node(JsonObject n, JsonObject propertyNames, bool debugUnredacted)
     {
         static const std::vector<std::string> roles = {
             "button",      "calendar",    "checkbox",  "combobox",     "edit",     "hyperlink",
@@ -216,6 +216,7 @@ struct Builder
             {
                 value = status("value");
                 value.Insert(L"value", old.GetNamedValue(k));
+                break;
             }
         auto t = status(winrt::to_string(n.GetNamedObject(L"text_capture", object())
                                              .GetNamedString(L"status", L"not_captured"))
@@ -235,7 +236,8 @@ struct Builder
         for (auto r : n.GetNamedArray(L"text_ranges", JsonArray()))
             lines.Append(text(r.GetObject()));
         bool redacted =
-            n.GetNamedBoolean(L"password", false) || n.GetNamedBoolean(L"content_redacted", false);
+            (n.GetNamedBoolean(L"password", false) && !debugUnredacted) ||
+            n.GetNamedBoolean(L"content_redacted", false);
         if (redacted)
         {
             t = status("redacted");
@@ -262,12 +264,12 @@ struct Builder
         o.Insert(L"shortcuts", shortcuts);
         JsonArray children;
         for (auto c : n.GetNamedArray(L"children", JsonArray()))
-            children.Append(node(c.GetObject(), propertyNames));
+            children.Append(node(c.GetObject(), propertyNames, debugUnredacted));
         o.Insert(L"children", children);
         return o;
     }
 };
-std::string normalize(const std::string &raw)
+std::string normalize(const std::string &raw, const std::string &provider = "windows-uia")
 {
     auto s = JsonObject::Parse(winrt::to_hstring(raw));
     auto b = s.GetNamedArray(L"screen_bounds"), size = s.GetNamedArray(L"image_size");
@@ -282,7 +284,7 @@ std::string normalize(const std::string &raw)
     out.Insert(L"version", number(3));
     auto source = object();
     source.Insert(L"platform", string("windows"));
-    source.Insert(L"provider", string("windows-uia"));
+    source.Insert(L"provider", string(provider));
     out.Insert(L"source", source);
     auto image = object();
     image.Insert(L"size", size);
@@ -296,10 +298,12 @@ std::string normalize(const std::string &raw)
     out.Insert(L"image", image);
     out.Insert(L"capture_policy", s.GetNamedObject(L"capture_policy"));
     out.Insert(L"warnings", s.GetNamedArray(L"warnings"));
-    out.Insert(L"root",
-               builder.node(s.GetNamedObject(L"root"), s.GetNamedObject(L"property_names")));
+    bool debugUnredacted = s.GetNamedObject(L"capture_policy", JsonObject())
+                               .GetNamedBoolean(L"debug_unredacted", false);
+    out.Insert(L"root", builder.node(s.GetNamedObject(L"root"),
+                                      s.GetNamedObject(L"property_names"), debugUnredacted));
     auto native = object();
-    native.Insert(L"provider", string("windows-uia"));
+    native.Insert(L"provider", string(provider));
     native.Insert(L"snapshot", s);
     out.Insert(L"native", native);
     return winrt::to_string(out.Stringify());
