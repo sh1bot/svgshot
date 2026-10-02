@@ -33,15 +33,15 @@ jobs:
               Start-Sleep -Milliseconds 100
             }
             if ($fixture.MainWindowHandle -eq 0) { throw 'Fixture window did not open' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke.png --uia-only
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/smoke.png --uia-only --accessibility-api uia
             if ($LASTEXITCODE -ne 0) { throw 'UIA snapshot failed' }
             $snapshot = Get-Content -Raw build/smoke.uia.json | ConvertFrom-Json
             if ($snapshot.root.label -ne 'svgshot Capture Fixture') { throw 'Wrong window title' }
             $raw = Get-Content -Raw build/smoke.uia.json
             if (!$raw.Contains('Add…') -or !$raw.Contains('Preserve semantics') -or !$raw.Contains('"checked":"checked"')) { throw 'Missing control semantics' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live.png --json
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live.png --json --accessibility-api uia
             if ($LASTEXITCODE -ne 0) { throw 'Window bitmap capture failed' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad.png --include-hidden-content
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad.png --include-hidden-content --accessibility-api uia
             if ($LASTEXITCODE -ne 0) { throw 'Opt-in full capture failed' }
             python tests/native_capture_smoke.py "$($fixture.MainWindowHandle)"
             if ($LASTEXITCODE -ne 0) { throw 'Embedded snapshot or broad semantics validation failed' }

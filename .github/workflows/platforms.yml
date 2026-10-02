@@ -35,9 +35,9 @@ jobs:
               Start-Sleep -Milliseconds 100
             }
             if ($fixture.MainWindowHandle -eq 0) { throw 'Fixture did not open' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live.png --json
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/live.png --json --accessibility-api uia
             if ($LASTEXITCODE -ne 0) { throw 'Capture failed' }
-            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad.png --include-hidden-content
+            & build/capture/Release/svgshot-capture-win.exe --hwnd "$($fixture.MainWindowHandle)" --out build/broad.png --include-hidden-content --accessibility-api uia
             if ($LASTEXITCODE -ne 0) { throw 'Broad capture failed' }
             python tests/native_capture_smoke.py "$($fixture.MainWindowHandle)"
             if ($LASTEXITCODE -ne 0) { throw 'Capture validation failed' }
