@@ -297,7 +297,7 @@ class TraceCache:
         if 'fingerprint' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
             self.db.execute('ALTER TABLE bitmaps ADD COLUMN fingerprint BLOB')
         self.db.execute('DROP INDEX IF EXISTS bitmap_dimensions')
-        review_marker = self.root/'.review-pages-v3'
+        review_marker = self.root/'.review-pages-v4'
         if not review_marker.is_file():
             for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
                                           ('vector',)).fetchall():
@@ -472,7 +472,11 @@ class TraceCache:
                       'minmax(0,1fr);gap:1.5rem}section{min-width:0}article{overflow:auto;'
                       'margin-bottom:1.5rem;border:1px solid #aaa;padding:1rem;background:#fff}'
                       'article.selected{border:3px solid #2669ac}img{max-width:none;'
-                      'background:var(--icon-background);border:1px solid #777}'
+                      'background-color:#f2f2f2;'
+                      'background-image:repeating-conic-gradient(from 45deg,'
+                      '#c8c8c8 0 25%,#f2f2f2 0 50%);background-size:20px 20px;'
+                      'border:1px solid #777}'
+                      '#captured-background:checked ~ main img{background:var(--icon-background)}'
                       '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
                       '.stage-preview{image-rendering:pixelated}figure{margin:1rem 0}'
                       'figcaption{font-weight:bold;margin-bottom:.3rem}'
@@ -487,6 +491,9 @@ class TraceCache:
                       f'Background: <code>{background}</code>. '
                       f'{len(variants)} source bitmap(s) and {len(traces)} trace result(s). '
                       'Images are shown at 16×; bitmap scaling uses nearest neighbour.</p>'
+                      '<input type="checkbox" id="captured-background">'
+                      '<label for="captured-background">Show captured background</label>'
+                      '<p>The diagonal checker indicates transparency.</p>'
                       '<main><section><h2>Observed bitmaps</h2>'
                       + ''.join(observations) + '</section><section><h2>Algorithm results</h2>'
                       + artwork + '</section></main></html>\n')

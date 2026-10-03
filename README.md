@@ -127,6 +127,8 @@ before sharing it. A matching HTML review page beside each SVG compares all
 matched bitmap crops at 16× nearest-neighbour scale with every algorithm's SVG.
 It also shows the foreground target, palette image, visible islands, ordered
 contour masks, and SVG beside the accessible names, offsets, and quality metrics.
+The page uses a diagonal checker to reveal transparency, with a switch to show
+the captured background.
 The images for older traces are restored when their regenerated SVG matches the
 original; traces whose original settings cannot be recovered show that the
 intermediate images are unavailable.

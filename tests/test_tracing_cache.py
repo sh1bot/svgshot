@@ -75,7 +75,7 @@ class TraceCacheTests(TestCase):
         with TemporaryDirectory() as folder:
             result=trace(icon(),'#ffffff',cache_dir=folder,name='Existing icon')
             result.review_path.unlink()
-            (Path(folder)/'.review-pages-v3').unlink()
+            (Path(folder)/'.review-pages-v4').unlink()
             with TraceCache(folder):
                 pass
             self.assertIn('Existing icon',result.review_path.read_text())
@@ -114,7 +114,7 @@ class TraceCacheTests(TestCase):
             result.svg_path.write_text(result.svg.replace('#1450dc','#ff0000'))
             preview=result.svg_path.with_name(result.svg_path.stem+'.target.png')
             preview.unlink()
-            (Path(folder)/'.review-pages-v3').unlink()
+            (Path(folder)/'.review-pages-v4').unlink()
             with TraceCache(folder):
                 pass
             self.assertTrue(preview.is_file())
@@ -129,7 +129,9 @@ class TraceCacheTests(TestCase):
             self.assertIsNotNone(result.review_path)
             page=result.review_path.read_text()
             self.assertIn('--icon-background:#101820',page)
-            self.assertIn('img{max-width:none;background:var(--icon-background)',page)
+            self.assertIn('background-image:repeating-conic-gradient(from 45deg',page)
+            self.assertIn('id="captured-background"',page)
+            self.assertIn('#captured-background:checked ~ main img{background:var(--icon-background)}',page)
             self.assertIn('.source-preview{image-rendering:pixelated}',page)
 
     def test_review_warns_when_original_metrics_describe_an_edited_svg(self):
@@ -153,7 +155,7 @@ class TraceCacheTests(TestCase):
             with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
                 db.execute('ALTER TABLE bitmaps DROP COLUMN match_kind')
                 db.execute('ALTER TABLE traces DROP COLUMN generated_hash')
-            (Path(folder)/'.review-pages-v3').unlink()
+            (Path(folder)/'.review-pages-v4').unlink()
             first.review_path.unlink()
             second.review_path.unlink()
             with TraceCache(folder):
