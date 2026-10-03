@@ -47,6 +47,12 @@ def _parser():
                         help="Disable source PNG overlays (including config-enabled overlays)")
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
     parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
+    parser.add_argument("--smooth-icons", action="store_true",
+                        help="Experimental source-palette, blur, 4x bicubic and Bézier icon tracing")
+    parser.add_argument("--icon-palette-size", type=int, metavar="N",
+                        help="Smooth icon palette size (2–32; default: 16)")
+    parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
+                        help="Smooth icon Gaussian blur radius in source pixels (0–4; default: 0.5)")
     add_options(parser)
     return parser
 
@@ -77,6 +83,14 @@ def _convert(data, snapshot, output, args):
         options.language = args.lang
     if args.font_family:
         options.font_family = args.font_family
+    if args.smooth_icons:
+        options.smooth_icons = True
+    if args.icon_palette_size is not None:
+        options.icon_palette_size = args.icon_palette_size
+    if args.icon_blur is not None:
+        options.icon_blur = args.icon_blur
+    if (not 2 <= options.icon_palette_size <= 32 or not 0 <= options.icon_blur <= 4):
+        raise ValueError("icon palette size must be 2–32 and blur radius 0–4 source pixels")
 
     def write(path, content):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,7 +104,8 @@ def _convert(data, snapshot, output, args):
         scene = reconstruct(source, options, artwork_boxes=icons)
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
-        simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback)
+        simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback,
+            smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur)
         def serialize():
             return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None
                     else to_svg(scene, options.font_family))

@@ -105,6 +105,12 @@ Unrecognized image details may remain as PNG regions. Use `--no-raster` to omit
 them. `--allow-raster` enables them when disabled by a configuration file.
 Inspect the SVG at its intended size before relying on it.
 
+For experimental icon smoothing, use `--smooth-icons`. It selects up to 16 distinct
+source colours, blurs by 0.5 source pixels, enlarges 4× with bicubic interpolation,
+quantises without dithering, then fits Bézier outlines. Tune with
+`--icon-palette-size N` and `--icon-blur RADIUS`. Icons that lose too much detail
+retain the usual bitmap fallback.
+
 ## Capture data
 
 Capture metadata is a version 3, compressed JSON record embedded in the PNG's

@@ -33,9 +33,13 @@ class ConversionTests(unittest.TestCase):
                  redirect_stderr(errors):
                 for source in (raw,semantic):
                     self.assertEqual(main([str(source),str(source.with_suffix('.svg')), '--no-ocr',
-                        '--no-raster','--report',str(source.with_suffix('.json'))]),0)
+                        '--no-raster','--smooth-icons','--icon-palette-size','8','--icon-blur','0.75',
+                        '--report',str(source.with_suffix('.json'))]),0)
             self.assertEqual(seen[0],seen[1])
             self.assertFalse(seen[0]['ocr'])
             self.assertFalse(seen[0]['raster_fallback'])
+            self.assertTrue(seen[0]['smooth_icons'])
+            self.assertEqual(seen[0]['icon_palette_size'],8)
+            self.assertEqual(seen[0]['icon_blur'],.75)
             self.assertEqual(errors.getvalue().count('no embedded semantic data'),1)
             self.assertIn('Recorded capture warning: Saved capture note',errors.getvalue())

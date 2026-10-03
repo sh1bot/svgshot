@@ -32,6 +32,9 @@ class Options:
     ocr: bool = True
     language: str = "eng"
     font_family: str = "auto"
+    smooth_icons: bool = False
+    icon_palette_size: int = 16
+    icon_blur: float = .5
 
     @classmethod
     def from_file(cls, path: str | None) -> "Options":
@@ -47,6 +50,9 @@ class Options:
             raise ValueError("colors must be 2–32, min_area positive, max_raster nonnegative")
         if not result.font_family or len(result.font_family) > 100:
             raise ValueError("font_family must be a nonempty font name")
+        if (not isinstance(result.icon_palette_size, int) or not 2 <= result.icon_palette_size <= 32
+                or not np.isfinite(result.icon_blur) or not 0 <= result.icon_blur <= 4):
+            raise ValueError("icon_palette_size must be 2–32 and icon_blur 0–4 source pixels")
         return result
 
 
@@ -1686,7 +1692,8 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
         right = max(n.box[0]+n.box[2] for n in all_nodes)
         bottom = max(n.box[1]+n.box[3] for n in all_nodes)
         root.children.append(Node("radio-group", (x,y,right-x,bottom-y), children=row))
-    return simplify_scene_artwork(root, image, allow_raster=options.raster_fallback)
+    return simplify_scene_artwork(root, image, allow_raster=options.raster_fallback,
+        smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur)
 
 
 def _iou_boxes(a,b):
