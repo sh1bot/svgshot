@@ -79,7 +79,9 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
              f'viewBox="0 0 {width} {height}" role="img">',
              f'<rect width="{width}" height="{height}" fill="{root.color}"/>']
 
+    artwork_clip_serial = 0
     def artwork_paths(node):
+        nonlocal artwork_clip_serial
         output = []
         for path in node.vector_data['paths']:
             stroke = f' stroke="{path["fill"]}" stroke-width="0.5"' if node.vector_data.get('opaque') else ''
@@ -87,12 +89,21 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             edges = '' if node.vector_data.get('local') else ' shape-rendering="crispEdges"'
             output.append(f'<path data-kind="capture-artwork"{edges} d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"{stroke}{opacity}/>')
         paths = '\n'.join(output)
+        if node.vector_data.get('clip_to_first') and output:
+            # Upper layers may overshoot after fitting. Keep all paint inside
+            # the base silhouette, including its transparent holes.
+            clip_id = f'icon-clip-{artwork_clip_serial}'
+            artwork_clip_serial += 1
+            outline = node.vector_data['paths'][0]['d']
+            paths = (f'<clipPath id="{clip_id}"><path d="{outline}" clip-rule="evenodd"/></clipPath>'
+                     f'<g clip-path="url(#{clip_id})">{paths}</g>')
         opacity = node.vector_data.get('icon_opacity', 1)
         return f'<g opacity="{opacity}">{paths}</g>' if opacity != 1 else paths
 
     def artwork_key(node):
         return json.dumps([node.vector_data['icon_size'],node.vector_data['paths'],
-                           node.vector_data.get('icon_opacity', 1)],sort_keys=True,separators=(',',':'))
+                           node.vector_data.get('icon_opacity', 1),
+                           node.vector_data.get('clip_to_first', False)],sort_keys=True,separators=(',',':'))
     icons = [n for n in flatten(root) if n.kind == 'capture-artwork' and n.vector_data.get('local')]
     counts = Counter(artwork_key(n) for n in icons)
     definitions = {}

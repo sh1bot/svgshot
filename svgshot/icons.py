@@ -73,18 +73,23 @@ def _simplify(points, tolerance):
     return np.concatenate((first[:-1],last[:-1]))
 
 
-def _render(layers, size, opacity=1.):
+def _render(layers, size, opacity=1., clip_to_first=False):
     w,h = size
     output = Image.new('RGBA',(w*4,h*4))
+    silhouette = None
     for color, contours in layers:
         mask = np.zeros((h*4,w*4),dtype=bool)
         for points in contours:
             part = Image.new('1',(w*4,h*4))
             ImageDraw.Draw(part).polygon([(round(x*4),round(y*4)) for x,y in points],fill=1)
             mask ^= np.asarray(part,dtype=bool)  # even-odd holes remain transparent
+        if silhouette is None:
+            silhouette = mask
         layer = Image.new('RGBA',output.size,tuple(color))
         layer.putalpha(Image.fromarray(mask.astype('uint8')*int(color[3])))
         output.alpha_composite(layer)
+    if clip_to_first and silhouette is not None:
+        output.putalpha(Image.fromarray(np.asarray(output.getchannel('A'))*silhouette))
     if opacity != 1.:
         output.putalpha(output.getchannel('A').point(lambda value: round(value*opacity)))
     return output.resize(size,Image.Resampling.LANCZOS)
@@ -388,6 +393,7 @@ def _smooth_candidate(target, box, palette_size, blur):
     visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
     indices = ((pixels[:, :, :3].astype(float)[:, :, None]-palette[None, None])**2).sum(axis=3).argmin(axis=2)
     masks, opacity = _stacked_masks(pixels, indices, palette, visible, alpha_source=target)
+    clip_to_first = len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
     raw = []
     for color, mask in masks:
         if mask.any():
@@ -416,7 +422,7 @@ def _smooth_candidate(target, box, palette_size, blur):
         layers = [(color, [np.concatenate([_sample_segment(c, np.linspace(0, 1, max(8,
             int(np.linalg.norm(np.diff(c, axis=0), axis=1).sum()*8)+1)))[:-1] for c in curves])
             for curves in contours]) for color, contours in fitted]
-        iou, error = _quality(target, _render(layers, (w, h), opacity))
+        iou, error = _quality(target, _render(layers, (w, h), opacity, clip_to_first))
         if iou < .82 or error > .16:
             continue
         paths = []
@@ -438,6 +444,7 @@ def _smooth_candidate(target, box, palette_size, blur):
             best = (size, Node('capture-artwork', box, vector_data={'paths':paths, 'local':True,
                 'icon_size':[w, h], 'approximation':'smooth-palette', 'palette_size':len(palette),
                 'blur_radius':blur, 'layering':'encirclement',
+                **({'clip_to_first':True} if clip_to_first else {}),
                 **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                 'silhouette_iou':round(iou, 3), 'colour_error':round(error, 3)}))
     return best
@@ -453,11 +460,12 @@ def _vector_candidate(target, monochrome, box, palette_size=None):
         distances = ((pixels[:,:,:3].astype(float)[:,:,None,:]-colors[None,None,:,:])**2).sum(axis=3)
         indices = distances.argmin(axis=2)
         masks, opacity = _stacked_masks(pixels, indices, colors, visible)
+        clip_to_first = len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
         raw = [(color, _contours(mask)) for color, mask in masks]
         for tolerance in (1.,.65,.35):
             layers = [(color,[_simplify(p,tolerance) for p in paths]) for color,paths in raw]
             layers = [(color,[p for p in paths if len(p)>=3]) for color,paths in layers]
-            rendered = _render(layers,(w,h),opacity)
+            rendered = _render(layers,(w,h),opacity,clip_to_first)
             iou,error = _quality(target,rendered)
             vertices = sum(len(p) for _,paths in layers for p in paths)
             if iou < .82 or error > .16 or vertices > 500:
@@ -473,6 +481,7 @@ def _vector_candidate(target, monochrome, box, palette_size=None):
                 best = (size,Node('capture-artwork',box,vector_data={'paths':paths,'local':True,
                     'icon_size':[w,h],'approximation':'monochrome' if monochrome else 'colour',
                     'layering':'encirclement',
+                    **({'clip_to_first':True} if clip_to_first else {}),
                     **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                     'silhouette_iou':round(iou,3),'colour_error':round(error,3)}))
     return best

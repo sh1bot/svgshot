@@ -108,6 +108,18 @@ class IconTests(unittest.TestCase):
                 self.assertLess(int(result[32:96, 60:68, 1].max()), 3,
                                 'background leaked through the shared colour boundary')
 
+    def test_upper_layers_cannot_paint_outside_base_or_inside_its_holes(self):
+        data = {'local': True, 'icon_size': [24, 24], 'clip_to_first': True,
+                'paths': [{'d': 'M2,2H22V22H2Z M8,8H16V16H8Z', 'fill': '#0000ff'},
+                          {'d': 'M0,0H24V24H0Z', 'fill': '#ff0000'}]}
+        # Include a repeated icon to exercise clipping within shared definitions.
+        icons = [Node('capture-artwork', (i*24, 0, 24, 24), vector_data=data.copy()) for i in range(2)]
+        result = render_svg(to_svg(Node('window', (0, 0, 48, 24), color='#00ff00', children=icons)), 48)
+        for i in range(2):
+            np.testing.assert_array_equal(result[12, i*24+12, :3], [0, 255, 0])
+            np.testing.assert_array_equal(result[0, i*24+12, :3], [0, 255, 0])
+            np.testing.assert_array_equal(result[4, i*24+12, :3], [255, 0, 0])
+
     def test_reparameterisation_fits_one_known_cubic(self):
         control = np.array([[0., 0.], [0., 8.], [8., 8.], [8., 0.]])
         points = _bezier(control, np.linspace(0, 1, 41)**2)
