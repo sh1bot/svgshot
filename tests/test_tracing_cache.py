@@ -4,13 +4,14 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 import sqlite3
+from html.parser import HTMLParser
 
 from PIL import Image, ImageDraw
 import numpy as np
 
 from svgshot.model import Node
 from svgshot.svg import to_svg
-from svgshot.tracing import trace
+from svgshot.tracing import trace, TraceCache
 from svgshot.validate import render
 
 
@@ -21,6 +22,50 @@ def icon(x=4, fill=(20, 80, 220)):
 
 
 class TraceCacheTests(TestCase):
+    def test_review_pages_follow_all_variants_names_and_algorithms(self):
+        with TemporaryDirectory() as folder:
+            first=trace(icon(),'#ffffff',cache_dir=folder,name='Blue <gear>')
+            self.assertTrue(first.review_path.is_file())
+            shifted=trace(icon(5),'#ffffff',cache_dir=folder,name='Settings & Tools')
+            alternate=trace(icon(),'#ffffff',cache_dir=folder,
+                            algorithm='smooth-palette',name='Another name')
+            for result in (first,alternate):
+                page=result.review_path.read_text()
+                self.assertEqual(result.review_path, result.svg_path.with_suffix('.html'))
+                self.assertIn('Blue &lt;gear&gt;',page)
+                self.assertIn('Settings &amp; Tools',page)
+                self.assertIn('Another name',page)
+                self.assertIn(f'../bitmaps/{first.source_hash}.png',page)
+                self.assertIn(f'../bitmaps/{shifted.source_hash}.png',page)
+                self.assertIn('width="384" height="384"',page)
+                self.assertIn('image-rendering:pixelated',page)
+                self.assertIn('offset (1, 0)',page)
+                self.assertIn(result.svg_path.name,page)
+                self.assertNotIn('<gear>',page)
+                class Images(HTMLParser):
+                    def __init__(self):
+                        super().__init__();self.images=[]
+                    def handle_starttag(self,tag,attrs):
+                        if tag=='img':self.images.append(dict(attrs))
+                parsed=Images();parsed.feed(page)
+                self.assertEqual(len(parsed.images),3)  # SVG plus two sources.
+            with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT name FROM names WHERE hash=? ORDER BY name',
+                                            (first.source_hash,)).fetchall(),
+                                 [('Another name',),('Blue <gear>',)])
+                self.assertEqual(db.execute('SELECT name FROM names WHERE hash=?',
+                                            (shifted.source_hash,)).fetchall(),
+                                 [('Settings & Tools',)])
+
+    def test_review_pages_are_backfilled_for_an_existing_cache(self):
+        with TemporaryDirectory() as folder:
+            result=trace(icon(),'#ffffff',cache_dir=folder,name='Existing icon')
+            result.review_path.unlink()
+            (Path(folder)/'.review-pages-v1').unlink()
+            with TraceCache(folder):
+                pass
+            self.assertIn('Existing icon',result.review_path.read_text())
+
     def test_exact_fuzzy_and_offsets_retain_each_bitmap(self):
         with TemporaryDirectory() as folder:
             first=trace(icon(), '#ffffff', cache_dir=folder)

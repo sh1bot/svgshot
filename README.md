@@ -122,13 +122,16 @@ standalone SVGs for each tracing algorithm. Edit an SVG in the cache and the
 next conversion will use your changes. `--icon-cache-dir DIR` selects its
 location; `--no-icon-cache` disables it. The default is the system user cache
 directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops may
-contain visible screen content, so inspect the cache before sharing it.
+contain visible screen content and accessible names, so inspect the cache
+before sharing it. A matching HTML review page beside each SVG shows every
+observed bitmap at 16× nearest-neighbour scale alongside the vector trace.
 
 For direct use in Python, `svgshot.tracing.trace(image, background,
 cache_dir=...)` accepts a cropped Pillow image and RGB colour (`"#ffffff"` or
 an RGB triple). The result contains `.svg` (the standalone file contents),
-`.svg_path`, `.node` (artwork ready for a scene), `.group_id`, `.source_hash`,
-`.offset`, and `.match`. `algorithm="smooth-palette"` selects the alternate
+`.svg_path`, `.review_path`, `.node` (artwork ready for a scene), `.group_id`,
+`.source_hash`, `.offset`, and `.match`. The optional `name` argument records an
+accessible label for the source bitmap. `algorithm="smooth-palette"` selects the alternate
 tracer. To trace one crop from a shell, run
 `svgshot-trace icon.png '#ffffff' --cache-dir ./icon-cache`; it prints the SVG
 file to edit. Each canonical group has its observed PNGs in `bitmaps/` and

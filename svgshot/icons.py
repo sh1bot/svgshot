@@ -9,7 +9,7 @@ from .tracing_core import (_background_color, _bezier, _fit_curve, _icon_palette
 
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None,
-                  blur=.5, cache_dir=False):
+                  blur=.5, cache_dir=False, name=None):
     """Trace a crop, with optional disk cache; direct calls default to no cache."""
     if cache_dir is False:
         return _uncached_simplify_icon(image,box,allow_raster=allow_raster,
@@ -18,7 +18,7 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
     background=_background_color(image,box)
     result=trace(image.crop((x,y,x+w,y+h)),background,
                  cache_dir=cache_dir,algorithm='smooth-palette' if smooth else 'palette',
-                 palette_size=palette_size,blur=blur,allow_raster=allow_raster)
+                 palette_size=palette_size,blur=blur,allow_raster=allow_raster,name=name)
     if result.node is not None:
         result.node.box=box
     return result.node
@@ -46,7 +46,8 @@ def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
             if key not in cache or cache_dir is not False:
                 cache[key] = simplify_icon(image,node.box,allow_raster=allow_raster,
                                            smooth=smooth,palette_size=palette_size,
-                                           blur=blur,cache_dir=cache_dir)
+                                           blur=blur,cache_dir=cache_dir,
+                                           name=node.vector_data.get('accessible_name'))
             template = cache[key]
             replacement = (Node(template.kind, node.box, image_data=template.image_data,
                                 vector_data=template.vector_data.copy()) if template is not None else None)

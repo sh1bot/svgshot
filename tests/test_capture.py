@@ -48,6 +48,39 @@ def semantic_snapshot():
 
 
 class CaptureTests(unittest.TestCase):
+    def test_named_image_and_icon_button_keep_accessible_names_for_cache(self):
+        from svgshot.icons import simplify_scene_artwork
+        s=snapshot()
+        s['root']['children'] = [element(50006,'Service icon',[120,225,24,24]),
+                                  element(50000,'Open menu',[180,225,24,24])]
+        image=Image.new('RGB',(300,180),'white')
+        ImageDraw.Draw(image).rectangle((21,26,42,47),fill='#1450dc')
+        ImageDraw.Draw(image).rectangle((81,26,102,47),fill='#dc3c14')
+        scene=Node('root',(0,0,300,180))
+        merge_uia(scene,image,s,ocr_enabled=False)
+        names={n.vector_data.get('accessible_name') for n in flatten(scene)
+               if n.kind=='capture-artwork'}
+        self.assertTrue({'Service icon','Open menu'} <= names)
+        with tempfile.TemporaryDirectory() as folder:
+            simplify_scene_artwork(scene,image,cache_dir=folder)
+            import sqlite3
+            with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
+                stored={row[0] for row in db.execute('SELECT name FROM names')}
+            self.assertTrue({'Service icon','Open menu'} <= stored)
+
+    def test_image_inside_protected_control_is_not_named_in_cache(self):
+        s=snapshot()
+        secret=element(50004,'Password',[120,225,40,30])
+        secret['password']=True
+        secret['children']=[element(50006,'Private detail',[124,229,24,24])]
+        s['root']['children']=[secret]
+        image=Image.new('RGB',(300,180),'white')
+        ImageDraw.Draw(image).rectangle((25,30,42,47),fill='#1450dc')
+        scene=Node('root',(0,0,300,180))
+        merge_uia(scene,image,s,ocr_enabled=False)
+        self.assertFalse(any(n.vector_data.get('accessible_name') for n in flatten(scene)
+                             if n.kind=='capture-artwork'))
+
     def test_msaa_sloping_tabs_replace_false_buttons_and_border_ink(self):
         s = snapshot()
         s['root']['children'] = [element(50019,'Extended',[120,325,100,28],
@@ -103,6 +136,9 @@ class CaptureTests(unittest.TestCase):
         merge_uia(scene,image,s)
         self.assertEqual([n.text for n in flatten(scene) if n.kind=='text'],['Known service'])
         self.assertTrue(any(n.kind=='capture-artwork' for n in flatten(scene)))
+        self.assertFalse(any(n.vector_data.get('accessible_name') for n in flatten(scene)
+                             if n.kind=='capture-artwork'),
+                         'A list row caption was mistaken for its generic icon name')
 
     def test_msaa_caption_retry_recovers_suffix_missing_from_page_ocr(self):
         s = snapshot()

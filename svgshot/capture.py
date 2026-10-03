@@ -281,7 +281,31 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
     suppressed = {id(n) for n in ocr if any(contains(b, n.box) for b in chrome_boxes)}
     controls, text_nodes = [], []
     icon_boxes = semantic_icon_boxes(image, snapshot)
-    artwork = [trace_artwork(image, b) for b in icon_boxes]
+    private_boxes = [local_box(item.get('bounds', []), snapshot) for item in items
+                     if item.get('password')]
+    def icon_name(item):
+        if (item.get('password') or kind(item) not in {'image', 'button'}):
+            return ''
+        bounds = local_box(item.get('bounds', []), snapshot)
+        if bounds and any(region and contains(region, bounds) for region in private_boxes):
+            return ''
+        return str(item.get('name') or item.get('label') or '').strip()
+
+    def named_artwork(box, item=None):
+        node = trace_artwork(image, box)
+        name = icon_name(item) if item else ''
+        if name:
+            node.vector_data['accessible_name'] = name
+        return node
+
+    def owner_of_icon(box):
+        candidates = [(b[2]*b[3], item) for item in items
+                      if kind(item) == 'image' and icon_name(item)
+                      if (b := local_box(item.get('bounds', []), snapshot))
+                      and (contains(b, box) or contains(box, b))]
+        return min(candidates, key=lambda pair: pair[0])[1] if candidates else None
+
+    artwork = [named_artwork(b, owner_of_icon(b)) for b in icon_boxes]
     text_boxes = [local_box(n["bounds"], snapshot) for n in items if kind(n) == "text"]
     terminals = {id(n) for n in items if n.get("class_name") == "TermControl"}
     authoritative = [local_box(n["bounds"], snapshot) for n in items
@@ -314,7 +338,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
         if not text.strip() or not box:
             return
         if icon_text(text):
-            artwork.append(trace_artwork(image, box))
+            artwork.append(named_artwork(box, owner))
             text_boxes.append(box)
             suppressed.update(id(n) for n in ocr if overlap(n.box, box) > n.box[2]*n.box[3]*.35)
             return
@@ -443,7 +467,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                 and not any(normalize(n.text) == normalize(item["name"]) for n in ocr if contains(box,n.box))
                 and not any(len(n.text.strip()) > 3 and n.confidence >= .6
                             and overlap(n.box,box) > n.box[2]*n.box[3]*.35 for n in ocr)):
-            artwork.append(trace_artwork(image, box))
+            artwork.append(named_artwork(box, item))
             suppressed.update(id(n) for n in ocr if overlap(n.box,box) > n.box[2]*n.box[3]*.35)
             continue
         caption = str(item.get("label", item.get("name", ""))).casefold()
@@ -460,7 +484,7 @@ def merge_uia(scene, image, snapshot, language="eng", *, ocr_enabled=True):
                 if cell and cell[0]-box[0] >= 28:
                     artwork.append(trace_artwork(image, (box[0], box[1]+2, cell[0]-box[0], max(1,box[3]-4))))
         if role == "image":
-            artwork.append(trace_artwork(image, box))
+            artwork.append(named_artwork(box, item))
         native = (item.get("class_name") == "Button" and item.get("framework_id") == "Win32"
                   or not item.get("framework_id"))
         if (not titlebar_button and
