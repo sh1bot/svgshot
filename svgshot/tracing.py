@@ -63,6 +63,31 @@ def _hash(image, background):
     return digest.hexdigest()
 
 
+def _fingerprint(image, background):
+    """Three mean composited channels; a cheap, translation-tolerant filter."""
+    pixels = np.asarray(image.convert('RGBA'),dtype=np.float32)
+    alpha = pixels[:,:,3:]/255
+    rgb = pixels[:,:,:3]*alpha+np.asarray(background,dtype=np.float32)*(1-alpha)
+    return bytes(np.rint(rgb.mean(axis=(0,1))).astype(np.uint8))
+
+
+def _fingerprint_might_match(query, known, query_size, known_size):
+    """Reject only means incompatible with the pixel matcher's error budget.
+
+    A one-pixel translation and a one-pixel size difference can each discard
+    up to two rows/columns from the compared region. Account for those border
+    pixels at maximum contrast so this filter cannot discard a valid match.
+    """
+    qw,qh = query_size
+    kw,kh = known_size
+    q_border = (1+max(0,qw-kw))/qw+(1+max(0,qh-kh))/qh
+    k_border = (1+max(0,kw-qw))/kw+(1+max(0,kh-qh))/kh
+    # Mean RGB error <= 3 implies any one channel differs by at most 9.
+    # Rounding each mean to a byte contributes at most one more level.
+    limit = 10+255*(q_border+k_border)
+    return all(abs(a-b)<=limit for a,b in zip(query,known))
+
+
 def _atomic_bytes(path, contents):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
@@ -252,7 +277,7 @@ class TraceCache:
               hash TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id),
               background TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
               dx REAL NOT NULL DEFAULT 0, dy REAL NOT NULL DEFAULT 0,
-              match_kind TEXT NOT NULL DEFAULT 'unrecorded');
+              match_kind TEXT NOT NULL DEFAULT 'unrecorded', fingerprint BLOB);
             CREATE TABLE IF NOT EXISTS traces (
               group_id TEXT NOT NULL REFERENCES groups(id), algorithm TEXT NOT NULL,
               status TEXT NOT NULL, hints TEXT NOT NULL DEFAULT '{}',
@@ -261,7 +286,7 @@ class TraceCache:
             CREATE TABLE IF NOT EXISTS names (
               hash TEXT NOT NULL REFERENCES bitmaps(hash), name TEXT NOT NULL,
               PRIMARY KEY (hash, name));
-            CREATE INDEX IF NOT EXISTS bitmap_dimensions ON bitmaps(width,height,background);
+            CREATE INDEX IF NOT EXISTS bitmap_search ON bitmaps(background,width,height);
         ''')
         if 'hints' not in [row[1] for row in self.db.execute('PRAGMA table_info(traces)')]:
             self.db.execute("ALTER TABLE traces ADD COLUMN hints TEXT NOT NULL DEFAULT '{}'")
@@ -269,6 +294,9 @@ class TraceCache:
             self.db.execute('ALTER TABLE traces ADD COLUMN generated_hash TEXT')
         if 'match_kind' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
             self.db.execute("ALTER TABLE bitmaps ADD COLUMN match_kind TEXT NOT NULL DEFAULT 'unrecorded'")
+        if 'fingerprint' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
+            self.db.execute('ALTER TABLE bitmaps ADD COLUMN fingerprint BLOB')
+        self.db.execute('DROP INDEX IF EXISTS bitmap_dimensions')
         review_marker = self.root/'.review-pages-v2'
         if not review_marker.is_file():
             for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
@@ -407,18 +435,31 @@ class TraceCache:
         digest = _hash(image,background)
         row = self.db.execute('SELECT group_id,dx,dy FROM bitmaps WHERE hash=?',(digest,)).fetchone()
         match = 'exact' if row else None
+        fingerprint = None
         if row:
             group,dx,dy = row
         else:
             group, dx, dy = digest, 0., 0.
             # Fuzzy matching is scoped to the same background and near-equal
             # dimensions. Each observed source image remains independently saved.
-            candidates = self.db.execute('''SELECT hash,group_id,dx,dy FROM bitmaps
-                WHERE background=? AND abs(width-?)<=1 AND abs(height-?)<=1''',
-                (rgb,image.width,image.height))
+            fingerprint = _fingerprint(image,background)
+            candidates = self.db.execute('''SELECT hash,group_id,dx,dy,width,height,fingerprint
+                FROM bitmaps WHERE background=? AND width BETWEEN ? AND ?
+                AND height BETWEEN ? AND ?''',
+                (rgb,image.width-1,image.width+1,image.height-1,image.height+1))
             best = None
-            for known_hash, known_group, known_dx, known_dy in candidates:
-                similarity = _bitmap_match(image,self._bitmap(known_hash),background)
+            for known_hash, known_group, known_dx, known_dy, width, height, known_fp in candidates:
+                known_image = None
+                if known_fp is None:  # Index created by a previous version: backfill on demand.
+                    known_image = self._bitmap(known_hash)
+                    known_fp = _fingerprint(known_image,background)
+                    with self.db:
+                        self.db.execute('UPDATE bitmaps SET fingerprint=? WHERE hash=?',
+                                        (known_fp,known_hash))
+                if not _fingerprint_might_match(fingerprint,known_fp,
+                                                image.size,(width,height)):
+                    continue
+                similarity = _bitmap_match(image,known_image or self._bitmap(known_hash),background)
                 if similarity and (best is None or similarity[0] < best[0]):
                     best = (similarity[0],known_group,known_dx+similarity[1][0],
                             known_dy+similarity[1][1])
@@ -457,9 +498,10 @@ class TraceCache:
             with self.db:
                 self.db.execute('INSERT OR IGNORE INTO groups VALUES (?,?,?)',(group,rgb,group))
                 self.db.execute('''INSERT OR IGNORE INTO bitmaps
-                    (hash,group_id,background,width,height,dx,dy,match_kind)
-                    VALUES (?,?,?,?,?,?,?,?)''',
-                    (digest,group,rgb,image.width,image.height,dx,dy,match or 'new'))
+                    (hash,group_id,background,width,height,dx,dy,match_kind,fingerprint)
+                    VALUES (?,?,?,?,?,?,?,?,?)''',
+                    (digest,group,rgb,image.width,image.height,dx,dy,match or 'new',
+                     fingerprint))
         if isinstance(name,str):
             name = ' '.join(name.split())
             if name:

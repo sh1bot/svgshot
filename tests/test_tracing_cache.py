@@ -11,7 +11,7 @@ import numpy as np
 
 from svgshot.model import Node
 from svgshot.svg import to_svg
-from svgshot.tracing import trace, TraceCache
+from svgshot.tracing import trace, TraceCache, _bitmap_match, _fingerprint, _fingerprint_might_match
 from svgshot.validate import render
 
 
@@ -136,6 +136,43 @@ class TraceCacheTests(TestCase):
             result=np.asarray(render(str(path),24))
             self.assertGreater(result[12,5,2],150)
             self.assertTrue((result[12,4,:3]>240).all())
+
+    def test_search_uses_dimension_index_and_skips_dissimilar_bitmaps(self):
+        with TemporaryDirectory() as folder, TraceCache(folder) as cache:
+            red=cache.trace(icon(fill=(240,0,0)),'#ffffff')
+            blue=cache.trace(icon(fill=(0,0,240)),'#ffffff')
+            self.assertNotEqual(red.group_id,blue.group_id)
+            plan=cache.db.execute('''EXPLAIN QUERY PLAN SELECT hash FROM bitmaps
+                WHERE background=? AND width BETWEEN ? AND ?
+                AND height BETWEEN ? AND ?''',('#ffffff',23,25,23,25)).fetchall()
+            self.assertTrue(any('bitmap_search (background=? AND width>?' in row[3]
+                                for row in plan),plan)
+            with patch.object(cache,'_bitmap',wraps=cache._bitmap) as read:
+                shifted=cache.trace(icon(5,fill=(240,0,0)),'#ffffff')
+            self.assertEqual(shifted.group_id,red.group_id)
+            self.assertNotIn(blue.source_hash,[call.args[0] for call in read.call_args_list])
+
+    def test_fingerprint_allows_valid_one_pixel_shift_with_transparency(self):
+        first=Image.new('RGBA',(24,24),(0,0,0,0))
+        second=Image.new('RGBA',(25,25),(0,0,0,0))
+        ImageDraw.Draw(first).rectangle((3,3,20,20),fill=(12,60,200,255))
+        ImageDraw.Draw(second).rectangle((4,4,21,21),fill=(12,60,200,255))
+        background=(248,248,248)
+        self.assertIsNotNone(_bitmap_match(second,first,background))
+        self.assertTrue(_fingerprint_might_match(_fingerprint(second,background),
+                        _fingerprint(first,background),second.size,first.size))
+
+    def test_old_cache_fingerprints_are_backfilled_when_searched(self):
+        with TemporaryDirectory() as folder:
+            red=trace(icon(fill=(240,0,0)),'#ffffff',cache_dir=folder)
+            with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
+                db.execute('ALTER TABLE bitmaps DROP COLUMN fingerprint')
+            with TraceCache(folder) as cache:
+                shifted=cache.trace(icon(5,fill=(240,0,0)),'#ffffff')
+                self.assertEqual(shifted.group_id,red.group_id)
+                fingerprint,=cache.db.execute('SELECT fingerprint FROM bitmaps WHERE hash=?',
+                                             (red.source_hash,)).fetchone()
+                self.assertEqual(len(fingerprint),3)
 
     def test_algorithms_have_separate_editable_svgs_and_shared_bitmap_index(self):
         with TemporaryDirectory() as folder:
