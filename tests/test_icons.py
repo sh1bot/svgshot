@@ -7,7 +7,8 @@ from PIL import Image, ImageDraw
 import numpy as np
 from svgshot.artwork import trace_artwork
 from svgshot.icons import (simplify_icon, simplify_scene_artwork, _distinct_palette,
-                           _smooth_quantize, _fit_curve, _sample_segment)
+                           _smooth_quantize, _fit_curve, _sample_segment,
+                           _bezier, _background_color, _target)
 from svgshot.model import Node
 from svgshot.svg import to_svg
 from svgshot.validate import render
@@ -21,6 +22,31 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_reparameterisation_fits_one_known_cubic(self):
+        control = np.array([[0., 0.], [0., 8.], [8., 8.], [8., 0.]])
+        points = _bezier(control, np.linspace(0, 1, 41)**2)
+        fitted = _fit_curve(points, np.array([0., 1.]), np.array([0., 1.]),
+                            .05, prefer_lines=False)
+        self.assertEqual(len(fitted), 1, 'A single smooth cubic was unnecessarily split')
+        sampled = _bezier(fitted[0], np.linspace(0, 1, 2049))
+        nearest = np.linalg.norm(points[:, None]-sampled[None], axis=2).min(axis=1)
+        self.assertLess(float(nearest.max()), .05)
+
+    def test_background_uses_actual_dominant_colour_and_can_be_reused(self):
+        blue, grey, white = (204, 232, 255), (139, 144, 152), (255, 255, 255)
+        image = Image.new('RGB', (18, 18), blue)
+        border = ([(x, 0) for x in range(18)] + [(17, y) for y in range(1, 18)]
+                  + [(x, 17) for x in range(16, -1, -1)] + [(0, y) for y in range(16, 0, -1)])
+        for i, point in enumerate(border):
+            image.putpixel(point, blue if i < 28 else grey if i < 52 else white)
+        background = _background_color(image, (2, 2, 14, 14), prefer_dominant=True)
+        np.testing.assert_array_equal(background, blue)
+        patch = Image.new('RGB', (18, 18), grey)
+        ImageDraw.Draw(patch).rectangle((3, 3, 14, 14), fill=blue)
+        target, _ = _target(patch, (0, 0, 18, 18), force_colour=True, background=background)
+        self.assertEqual(target.getpixel((8, 8))[3], 0, 'Shared background became foreground')
+        self.assertEqual(target.getpixel((0, 0))[3], 255)
+
     def test_line_fit_tolerates_noise_and_checks_endpoint_overshoot(self):
         points = np.array([[0., 0.], [2., .2], [4., -.2], [6., 0.]])
         segments = _fit_curve(points, np.array([1., 0.]), np.array([-1., 0.]), .25)

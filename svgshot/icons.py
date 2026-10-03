@@ -101,7 +101,21 @@ def _quality(target, rendered):
     return float(iou),float((error[union].mean()+alpha_error[union].mean())/2)
 
 
-def _target(image, box, *, force_colour=False):
+def _background_color(image, box, *, prefer_dominant=False):
+    x, y, w, h = box
+    pad = np.asarray(image.crop((max(0,x-2),max(0,y-2),min(image.width,x+w+2),
+                                 min(image.height,y+h+2))).convert('RGB'))
+    border = np.concatenate((pad[0],pad[-1],pad[:,0],pad[:,-1]))
+    colors, counts = np.unique(border, axis=0, return_counts=True)
+    # A channel-wise median can invent a colour halfway between a selection
+    # background and a border. Prefer an actual repeated background colour.
+    index = int(counts.argmax())
+    if prefer_dominant and counts[index] >= max(3, len(border)*.05):
+        return colors[index].astype(float)
+    return np.median(border, axis=0)
+
+
+def _target(image, box, *, force_colour=False, background=None):
     x,y,w,h = box
     patch = image.crop((x,y,x+w,y+h)).convert('RGBA')
     pixels = np.asarray(patch).astype(float)
@@ -110,9 +124,7 @@ def _target(image, box, *, force_colour=False):
     if not has_alpha:
         # A screenshot is already composited. Its surrounding pixels usually
         # provide a better background estimate than a tightly cropped icon edge.
-        pad = np.asarray(image.crop((max(0,x-2),max(0,y-2),min(image.width,x+w+2),min(image.height,y+h+2))).convert('RGB'))
-        border = np.concatenate((pad[0],pad[-1],pad[:,0],pad[:,-1]))
-        background = np.median(border,axis=0)
+        background = _background_color(image, box) if background is None else background
         distance = np.linalg.norm(rgb-background,axis=2)
         foreground = distance > 40
     else:
@@ -215,15 +227,42 @@ def _fit_curve(points, left, right, tolerance, *, prefer_lines=True):
         span = np.linalg.norm(points[-1] - points[0]) / 3
         return [np.array([points[0], points[0]+left*span, points[-1]+right*span, points[-1]])]
     t = np.concatenate(([0.], np.cumsum(chord))) / distance
-    b0, b1, b2, b3 = (1-t)**3, 3*t*(1-t)**2, 3*t*t*(1-t), t**3
-    residual = points - (b0+b1)[:, None]*points[0] - (b2+b3)[:, None]*points[-1]
-    matrix = np.stack((b1[:, None]*left, b2[:, None]*right), axis=2).reshape(-1, 2)
-    lengths = np.linalg.lstsq(matrix, residual.reshape(-1), rcond=None)[0]
-    if (lengths <= 1e-6).any() or (lengths > distance).any():
-        lengths[:] = np.linalg.norm(points[-1]-points[0]) / 3
-    control = np.array([points[0], points[0]+left*lengths[0],
-                        points[-1]+right*lengths[1], points[-1]])
+    def fit(parameters):
+        b0, b1, b2, b3 = ((1-parameters)**3, 3*parameters*(1-parameters)**2,
+                          3*parameters**2*(1-parameters), parameters**3)
+        residual = points - (b0+b1)[:, None]*points[0] - (b2+b3)[:, None]*points[-1]
+        matrix = np.stack((b1[:, None]*left, b2[:, None]*right), axis=2).reshape(-1, 2)
+        lengths = np.linalg.lstsq(matrix, residual.reshape(-1), rcond=None)[0]
+        if (lengths <= 1e-6).any() or (lengths > distance).any():
+            lengths[:] = np.linalg.norm(points[-1]-points[0]) / 3
+        return np.array([points[0], points[0]+left*lengths[0],
+                         points[-1]+right*lengths[1], points[-1]])
+    control = fit(t)
     error = np.linalg.norm(_bezier(control, t)-points, axis=1)
+    # Newton projection updates the correspondence along the curve before
+    # splitting. Preserve point order; this is local reparameterisation, not
+    # a claim of an exact global nearest-point solution for arbitrary cubics.
+    for _ in range(4):
+        if float(error.max()) <= tolerance:
+            break
+        u = t[:, None]
+        first = 3*((1-u)**2*(control[1]-control[0]) +
+                   2*(1-u)*u*(control[2]-control[1]) + u**2*(control[3]-control[2]))
+        second = 6*((1-u)*(control[2]-2*control[1]+control[0]) +
+                    u*(control[3]-2*control[2]+control[1]))
+        residual = _bezier(control, t)-points
+        denominator = (first*first).sum(axis=1)+(residual*second).sum(axis=1)
+        step = np.divide((residual*first).sum(axis=1), denominator,
+                         out=np.zeros_like(t), where=np.abs(denominator)>1e-9)
+        revised = np.clip(t-step, 0, 1)
+        revised[0], revised[-1] = 0, 1
+        if (np.diff(revised) <= 0).any():
+            break
+        candidate = fit(revised)
+        candidate_error = np.linalg.norm(_bezier(candidate, revised)-points, axis=1)
+        if float(candidate_error.max()) >= float(error.max()):
+            break
+        t, control, error = revised, candidate, candidate_error
     split = int(error[1:-1].argmax()) + 1
     if error[split] <= tolerance:
         return [control]
@@ -242,8 +281,7 @@ def _sample_segment(segment, t):
 def _curve_contour(points, tolerance, *, prefer_lines=True):
     # Measure turns across a source-pixel neighbourhood, rather than preserving
     # every right angle on the 4x quantized staircase as an intentional corner.
-    previous, following = points-np.roll(points, 1, axis=0), np.roll(points, -1, axis=0)-points
-    dots = []
+    dots, incoming, outgoing = [], [], []
     for i, point in enumerate(points):
         neighbours = []
         for direction in (-1, 1):
@@ -253,18 +291,27 @@ def _curve_contour(points, tolerance, *, prefer_lines=True):
                     break
             neighbours.append(neighbour)
         a, b = point-neighbours[0], neighbours[1]-point
+        incoming.append(a/max(np.linalg.norm(a), 1e-9))
+        outgoing.append(b/max(np.linalg.norm(b), 1e-9))
         dots.append(float(np.dot(a, b) / max(np.linalg.norm(a)*np.linalg.norm(b), 1e-9)))
     corners = []
     for i in np.argsort(dots):
         if dots[i] < .5 and all(np.linalg.norm(points[i]-points[j]) >= 1.5 for j in corners):
             corners.append(int(i))
-    anchors = sorted(set(corners + [0, int(np.linalg.norm(points-points[0], axis=1).argmax())]))
+    anchors = sorted(corners) if len(corners) >= 2 else sorted(set(
+        corners + [0, int(np.linalg.norm(points-points[0], axis=1).argmax())]))
     curves = []
     for i, start in enumerate(anchors):
         end = anchors[(i+1) % len(anchors)]
         span = points[start:end+1] if end > start else np.concatenate((points[start:], points[:end+1]))
-        left = span[1]-span[0] if start in corners else following[start]+previous[start]
-        right = span[-2]-span[-1] if end in corners else -following[end]-previous[end]
+        def end_direction(sequence):
+            for point in sequence[1:]:
+                direction = point-sequence[0]
+                if np.linalg.norm(direction) >= 1.5:
+                    return direction
+            return sequence[-1]-sequence[0]
+        left = end_direction(span) if start in corners else incoming[start]+outgoing[start]
+        right = end_direction(span[::-1]) if end in corners else -incoming[end]-outgoing[end]
         curves.extend(_fit_curve(span, left, right, tolerance, prefer_lines=prefer_lines))
     return curves
 
@@ -276,10 +323,12 @@ def _smooth_candidate(image, box, palette_size, blur):
     if not len(palette):
         return None
     filtered = _smooth_quantize(patch, palette, blur)
-    target, _ = _target(image, box, force_colour=True)
+    background = _background_color(image, box, prefer_dominant=True)
+    target, _ = _target(image, box, force_colour=True, background=background)
     # Background removal happens after quantization, so screenshot backgrounds
     # participate in both palette selection and edge smoothing.
-    prepared, _ = _target(filtered, (0, 0, w*4, h*4), force_colour=True)
+    prepared, _ = _target(filtered, (0, 0, w*4, h*4), force_colour=True,
+                          background=background)
     if target is None or prepared is None:
         return None
     pixels = np.asarray(prepared)
