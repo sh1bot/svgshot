@@ -50,7 +50,7 @@ def _parser():
     parser.add_argument("--smooth-icons", action="store_true",
                         help="Experimental source-palette, blur, 4x bicubic and Bézier icon tracing")
     parser.add_argument("--icon-palette-size", type=int, metavar="N",
-                        help="Smooth icon palette size (2–32; default: 16)")
+                        help="Smooth icon palette size (2–32; default: 4)")
     parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
                         help="Smooth icon Gaussian blur radius in source pixels (0–4; default: 0.5)")
     add_options(parser)

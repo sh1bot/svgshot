@@ -33,7 +33,7 @@ class Options:
     language: str = "eng"
     font_family: str = "auto"
     smooth_icons: bool = False
-    icon_palette_size: int = 16
+    icon_palette_size: int = 4
     icon_blur: float = .5
 
     @classmethod

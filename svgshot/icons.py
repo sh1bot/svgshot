@@ -427,7 +427,7 @@ def _vector_candidate(target, monochrome, box):
     return best
 
 
-def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=16, blur=.5):
+def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=4, blur=.5):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
     if (not isinstance(palette_size, int) or not 2 <= palette_size <= 32
@@ -455,7 +455,7 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=1
                 vector_data={'icon_fallback':True})
 
 
-def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False, palette_size=16, blur=.5):
+def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False, palette_size=4, blur=.5):
     """Both recognition routes converge here, after control/text heuristics."""
     cache = {}
     def visit(parent):
