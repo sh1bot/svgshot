@@ -6,7 +6,7 @@ from xml.etree import ElementTree as ET
 from PIL import Image, ImageDraw
 import numpy as np
 from svgshot.artwork import trace_artwork
-from svgshot.icons import (simplify_icon, simplify_scene_artwork, _distinct_palette,
+from svgshot.icons import (simplify_icon, simplify_scene_artwork, _icon_palette,
                            _smooth_quantize, _fit_curve, _sample_segment,
                            _bezier, _background_color, _target)
 from svgshot.model import Node
@@ -70,16 +70,19 @@ class IconTests(unittest.TestCase):
         self.assertTrue((result[1, 16, :3] > 240).all())
         self.assertLess(sum(len(p['d']) for p in icon.vector_data['paths']), 350)
 
-    def test_distinct_palette_uses_source_colours_and_ignores_hidden_rgb(self):
+    def test_icon_palette_uses_source_colours_and_ignores_hidden_rgb(self):
         image = Image.new('RGBA', (12, 12), (255, 0, 255, 0))
         draw = ImageDraw.Draw(image)
         draw.rectangle((2, 2, 9, 9), fill=(0, 0, 0, 255))
         draw.point((3, 3), fill=(1, 1, 1, 255))
         draw.point((4, 4), fill=(255, 255, 255, 255))
         draw.point((5, 5), fill=(255, 0, 0, 255))
-        palette = _distinct_palette(image, 3)
-        np.testing.assert_array_equal(palette, [[0, 0, 0], [255, 255, 255], [255, 0, 0]])
-        self.assertEqual(len(_distinct_palette(image, 16)), 4)
+        palette = _icon_palette(image, 3)
+        foreground = np.asarray(image)[:, :, :3][np.asarray(image)[:, :, 3] > 8]
+        expected = Image.fromarray(foreground.reshape(1, -1, 3)).quantize(
+            colors=3, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE).convert('RGB')
+        np.testing.assert_array_equal(palette, np.unique(np.asarray(expected).reshape(-1, 3), axis=0))
+        self.assertEqual(len(_icon_palette(image, 16)), 4)
         filtered = _smooth_quantize(image, palette, .5)
         self.assertEqual(filtered.size, (48, 48))
         self.assertTrue(set(map(tuple, np.asarray(filtered)[:, :, :3].reshape(-1, 3)))
@@ -88,8 +91,21 @@ class IconTests(unittest.TestCase):
         changed = np.asarray(image).copy()
         changed[changed[:, :, 3] == 0, :3] = [0, 255, 0]
         changed = Image.fromarray(changed)
-        np.testing.assert_array_equal(_distinct_palette(changed, 3), palette)
+        np.testing.assert_array_equal(_icon_palette(changed, 3), palette)
         np.testing.assert_array_equal(_smooth_quantize(changed, palette, .5), filtered)
+
+    def test_palette_size_applies_to_both_tracers(self):
+        image = Image.new('RGBA', (32, 32))
+        draw = ImageDraw.Draw(image)
+        for box, color in [((4,4,15,15),'red'), ((16,4,27,15),'green'),
+                           ((4,16,15,27),'blue'), ((16,16,27,27),'yellow')]:
+            draw.rectangle(box, fill=color)
+        for smooth in (False, True):
+            icon = simplify_icon(image, (0,0,32,32), smooth=smooth, palette_size=2)
+            self.assertEqual(icon.kind, 'capture-artwork')
+            self.assertLessEqual(len({p['fill'] for p in icon.vector_data['paths']}), 2)
+            expected = {'#%02x%02x%02x' % tuple(c) for c in _icon_palette(image, 2)}
+            self.assertTrue({p['fill'] for p in icon.vector_data['paths']} <= expected)
 
     def test_smooth_curves_keep_ring_hole_and_source_palette(self):
         image = Image.new('RGBA', (40, 40), (255, 0, 255, 0))

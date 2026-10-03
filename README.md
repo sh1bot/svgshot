@@ -105,11 +105,14 @@ Unrecognized image details may remain as PNG regions. Use `--no-raster` to omit
 them. `--allow-raster` enables them when disabled by a configuration file.
 Inspect the SVG at its intended size before relying on it.
 
-For experimental icon smoothing, use `--smooth-icons`. It selects up to 4 distinct
-source colours, blurs by 0.5 source pixels, enlarges 4× with bicubic interpolation,
-quantises without dithering, then fits straight segments and Bézier curves. Tune with
-`--icon-palette-size N` and `--icon-blur RADIUS`. Icons that lose too much detail
-retain the usual bitmap fallback.
+Both icon tracers use foreground-only median-cut palettes, automatically trying
+4, 8 and 12 colours (one for monochrome icons). Use `--icon-palette-size N` to
+set a fixed palette size for either tracer.
+
+For experimental icon smoothing, use `--smooth-icons`. It blurs by 0.5 source
+pixels, enlarges 4× with bicubic interpolation, quantises without dithering,
+then fits straight segments and Bézier curves. Tune blur with `--icon-blur RADIUS`.
+Icons that lose too much detail retain the usual bitmap fallback.
 
 ## Capture data
 

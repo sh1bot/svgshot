@@ -48,9 +48,9 @@ def _parser():
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
     parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
     parser.add_argument("--smooth-icons", action="store_true",
-                        help="Experimental source-palette, blur, 4x bicubic and Bézier icon tracing")
+                        help="Experimental median-cut palette, blur, 4x bicubic and Bézier icon tracing")
     parser.add_argument("--icon-palette-size", type=int, metavar="N",
-                        help="Smooth icon palette size (2–32; default: 4)")
+                        help="Icon palette size for both tracers (2–32; default: automatic 4/8/12)")
     parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
                         help="Smooth icon Gaussian blur radius in source pixels (0–4; default: 0.5)")
     add_options(parser)
@@ -89,7 +89,8 @@ def _convert(data, snapshot, output, args):
         options.icon_palette_size = args.icon_palette_size
     if args.icon_blur is not None:
         options.icon_blur = args.icon_blur
-    if (not 2 <= options.icon_palette_size <= 32 or not 0 <= options.icon_blur <= 4):
+    if ((options.icon_palette_size is not None and not 2 <= options.icon_palette_size <= 32)
+            or not 0 <= options.icon_blur <= 4):
         raise ValueError("icon palette size must be 2–32 and blur radius 0–4 source pixels")
 
     def write(path, content):

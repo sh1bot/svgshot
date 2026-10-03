@@ -33,7 +33,7 @@ class Options:
     language: str = "eng"
     font_family: str = "auto"
     smooth_icons: bool = False
-    icon_palette_size: int = 4
+    icon_palette_size: int | None = None
     icon_blur: float = .5
 
     @classmethod
@@ -50,8 +50,8 @@ class Options:
             raise ValueError("colors must be 2–32, min_area positive, max_raster nonnegative")
         if not result.font_family or len(result.font_family) > 100:
             raise ValueError("font_family must be a nonempty font name")
-        if (not isinstance(result.icon_palette_size, int) or not 2 <= result.icon_palette_size <= 32
-                or not np.isfinite(result.icon_blur) or not 0 <= result.icon_blur <= 4):
+        if ((result.icon_palette_size is not None and (not isinstance(result.icon_palette_size, int)
+                or not 2 <= result.icon_palette_size <= 32)) or not np.isfinite(result.icon_blur) or not 0 <= result.icon_blur <= 4):
             raise ValueError("icon_palette_size must be 2–32 and icon_blur 0–4 source pixels")
         return result
 

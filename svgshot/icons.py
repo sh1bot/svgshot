@@ -153,30 +153,24 @@ def _target(image, box, *, force_colour=False, background=None):
     return Image.fromarray(rgba),monochrome
 
 
-def _distinct_palette(patch, count):
-    """Greedy max-min RGB separation, seeded with the most frequent source colour.
-
-    This approximates a maximally distinct set; every entry is an actual source
-    RGB triple. Hidden RGB in transparent pixels does not consume palette slots.
-    Ties use lexicographic order for reproducible captures.
-    """
-    pixels = np.asarray(patch.convert('RGBA'))
-    visible = pixels[:, :, 3] > 8
+def _icon_palette(target, count):
+    """Median-cut representatives from visible foreground samples only."""
+    pixels = np.asarray(target.convert('RGBA'))
+    visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
     if not visible.any():
         return np.empty((0, 3), dtype=np.uint8)
-    colors, frequencies = np.unique(pixels[:, :, :3][visible], axis=0, return_counts=True)
-    values = colors.astype(float)
-    selected = [int(frequencies.argmax())]
-    distances = ((values - values[selected[0]]) ** 2).sum(axis=1)
-    for _ in range(min(count, len(colors)) - 1):
-        index = int(distances.argmax())
-        selected.append(index)
-        distances = np.minimum(distances, ((values - values[index]) ** 2).sum(axis=1))
-    return colors[selected]
+    sample = Image.fromarray(pixels[:, :, :3][visible].reshape(1, -1, 3))
+    quantized = sample.quantize(colors=count, method=Image.Quantize.MEDIANCUT,
+                               dither=Image.Dither.NONE)
+    return np.unique(np.asarray(quantized.convert('RGB')).reshape(-1, 3), axis=0)
+
+
+def _palette_counts(monochrome, palette_size):
+    return (palette_size,) if palette_size is not None else ((1,) if monochrome else (4, 8, 12))
 
 
 def _smooth_quantize(patch, palette, blur):
-    """Blur first, bicubic 4x second, then nearest source-palette RGB, no dither.
+    """Blur first, bicubic 4x second, then nearest palette RGB, no dither.
 
     Filter premultiplied RGBA so invisible RGB never bleeds into the boundary.
     Alpha stays separate from the RGB palette and is used for silhouette tracing.
@@ -316,21 +310,14 @@ def _curve_contour(points, tolerance, *, prefer_lines=True):
     return curves
 
 
-def _smooth_candidate(image, box, palette_size, blur):
+def _smooth_candidate(target, box, palette_size, blur):
     x, y, w, h = box
-    patch = image.crop((x, y, x+w, y+h)).convert('RGBA')
-    palette = _distinct_palette(patch, palette_size)
+    palette = _icon_palette(target, palette_size)
     if not len(palette):
         return None
-    filtered = _smooth_quantize(patch, palette, blur)
-    background = _background_color(image, box, prefer_dominant=True)
-    target, _ = _target(image, box, force_colour=True, background=background)
-    # Background removal happens after quantization, so screenshot backgrounds
-    # participate in both palette selection and edge smoothing.
-    prepared, _ = _target(filtered, (0, 0, w*4, h*4), force_colour=True,
-                          background=background)
-    if target is None or prepared is None:
-        return None
+    # Isolate foreground once, before filtering. Background colours must not
+    # consume palette slots or become foreground when quantized to this palette.
+    prepared = _smooth_quantize(target, palette, blur)
     pixels = np.asarray(prepared)
     visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
     raw = []
@@ -388,18 +375,13 @@ def _smooth_candidate(image, box, palette_size, blur):
     return best
 
 
-def _vector_candidate(target, monochrome, box):
+def _vector_candidate(target, monochrome, box, palette_size=None):
     x,y,w,h = box
     pixels = np.asarray(target)
     visible = pixels[:,:,3] > max(8,float(pixels[:,:,3].max())*.35)
     best = None
-    for count in ((1,) if monochrome else (4,8,12)):
-        # Quantize foreground samples only: transparent background colours must
-        # neither consume the palette nor bleed into visible icon edges.
-        sample = Image.fromarray(pixels[:,:,:3][visible].reshape(1,-1,3))
-        quantized = sample.quantize(colors=count,method=Image.Quantize.MEDIANCUT,dither=Image.Dither.NONE)
-        palette = np.asarray(quantized.convert('RGB')).reshape(-1,3)
-        colors = np.unique(palette,axis=0)
+    for count in _palette_counts(monochrome, palette_size):
+        colors = _icon_palette(target, count)
         distances = ((pixels[:,:,:3].astype(float)[:,:,None,:]-colors[None,None,:,:])**2).sum(axis=3)
         indices = distances.argmin(axis=2)
         raw = [(tuple(int(v) for v in color)+(int(np.percentile(pixels[:,:,3][visible & (indices==i)],90)),),
@@ -427,22 +409,26 @@ def _vector_candidate(target, monochrome, box):
     return best
 
 
-def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=4, blur=.5):
+def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None, blur=.5):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
-    if (not isinstance(palette_size, int) or not 2 <= palette_size <= 32
+    if ((palette_size is not None and (not isinstance(palette_size, int) or not 2 <= palette_size <= 32))
             or not np.isfinite(blur) or not 0 <= blur <= 4):
         raise ValueError('icon palette size must be 2–32 and blur radius 0–4 source pixels')
     target,monochrome = _target(image,box)
     if target is None:
         return None
-    best = (_smooth_candidate(image, box, palette_size, blur) if smooth
-            else _vector_candidate(target,monochrome,box))
-    if best is None and monochrome and not smooth:
-        # A shaded colour icon can lie close to one colour axis. Failure of a
-        # glyph approximation is a reason to try colour, not immediately PNG.
-        target,_ = _target(image,box,force_colour=True)
-        best = _vector_candidate(target,False,box)
+    def candidate(target, monochrome):
+        if not smooth:
+            return _vector_candidate(target, monochrome, box, palette_size)
+        choices = [_smooth_candidate(target, box, count, blur)
+                   for count in _palette_counts(monochrome, palette_size)]
+        return min((choice for choice in choices if choice is not None),
+                   key=lambda choice: choice[0], default=None)
+    best = candidate(target, monochrome)
+    if best is None and monochrome:
+        target, _ = _target(image, box, force_colour=True)
+        best = candidate(target, False)
     if best:
         return best[1]
     if not allow_raster:
@@ -455,7 +441,7 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=4
                 vector_data={'icon_fallback':True})
 
 
-def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False, palette_size=4, blur=.5):
+def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False, palette_size=None, blur=.5):
     """Both recognition routes converge here, after control/text heuristics."""
     cache = {}
     def visit(parent):
