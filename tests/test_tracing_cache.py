@@ -66,6 +66,17 @@ class TraceCacheTests(TestCase):
                 pass
             self.assertIn('Existing icon',result.review_path.read_text())
 
+    def test_review_uses_the_intended_background_for_transparent_images(self):
+        with TemporaryDirectory() as folder:
+            image=Image.new('RGBA',(24,24))
+            ImageDraw.Draw(image).rectangle((4,4,19,19),fill=(255,255,255,255))
+            result=trace(image,'#101820',cache_dir=folder)
+            self.assertIsNotNone(result.review_path)
+            page=result.review_path.read_text()
+            self.assertIn('--icon-background:#101820',page)
+            self.assertIn('.preview{background:var(--icon-background)',page)
+            self.assertIn('.source img{image-rendering:pixelated;background:var(--icon-background)',page)
+
     def test_exact_fuzzy_and_offsets_retain_each_bitmap(self):
         with TemporaryDirectory() as folder:
             first=trace(icon(), '#ffffff', cache_dir=folder)

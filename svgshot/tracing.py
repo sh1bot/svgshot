@@ -291,6 +291,8 @@ class TraceCache:
         return self.root/'groups'/group/'algorithms'/f'{algorithm}.svg'
 
     def _refresh_review_pages(self, group):
+        background, = self.db.execute('SELECT background FROM groups WHERE id=?',
+                                      (group,)).fetchone()
         variants = self.db.execute('''SELECT hash,width,height,dx,dy FROM bitmaps
             WHERE group_id=? ORDER BY CASE WHEN hash=? THEN 0 ELSE 1 END, hash''',
             (group,group)).fetchall()
@@ -319,12 +321,15 @@ class TraceCache:
                     f'{"<ul>"+labels+"</ul>" if names else ""}</article>')
             markup = ('<!doctype html><html lang="en"><meta charset="utf-8">'
                       f'<title>Trace review: {escape(algorithm)}</title>'
-                      '<style>body{font:16px system-ui,sans-serif;color:#181818;background:#fafafa;'
+                      f'<style>:root{{--icon-background:{background}}}'
+                      'body{font:16px system-ui,sans-serif;color:#181818;background:#fafafa;'
                       'margin:1.5rem}main{display:grid;grid-template-columns:max-content minmax(0,1fr);'
                       'gap:2rem}section{min-width:0;overflow:auto}.trace{position:sticky;top:0;'
-                      'align-self:start}.preview{background:#fff;border:1px solid #777;max-width:none}'
+                      'align-self:start}.preview{background:var(--icon-background);'
+                      'border:1px solid #777;max-width:none}'
                       '.source{image-rendering:pixelated}.source img{image-rendering:pixelated;'
-                      'max-width:none;border:1px solid #777}.source article{margin-bottom:2rem}'
+                      'background:var(--icon-background);max-width:none;'
+                      'border:1px solid #777}.source article{margin-bottom:2rem}'
                       'code{overflow-wrap:anywhere}h3{font-size:1rem}'
                       '@media(max-width:700px){main{display:block}.trace{position:static}}'
                       '</style>'
