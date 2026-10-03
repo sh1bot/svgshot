@@ -39,8 +39,15 @@ class TraceCacheTests(TestCase):
                 self.assertIn(f'../bitmaps/{shifted.source_hash}.png',page)
                 self.assertIn('width="384" height="384"',page)
                 self.assertIn('image-rendering:pixelated',page)
-                self.assertIn('offset (1, 0)',page)
-                self.assertIn(result.svg_path.name,page)
+                self.assertIn('<dt>Offset</dt><dd>(1, 0) pixels</dd>',page)
+                for svg in (first.svg_path,alternate.svg_path):
+                    self.assertIn(f'src="{svg.name}"',page)
+                self.assertIn(f'<code>{first.source_hash}</code>',page)
+                self.assertIn('<dt>Match</dt><dd>bitmap</dd>',page)
+                self.assertIn('<dt>Silhouette IoU</dt>',page)
+                self.assertIn('<dt>Palette colours</dt>',page)
+                self.assertIn('<h2>Algorithm results</h2>',page)
+                self.assertIn(f'<article class="selected" data-algorithm="{result.svg_path.stem}">',page)
                 self.assertNotIn('<gear>',page)
                 class Images(HTMLParser):
                     def __init__(self):
@@ -48,7 +55,9 @@ class TraceCacheTests(TestCase):
                     def handle_starttag(self,tag,attrs):
                         if tag=='img':self.images.append(dict(attrs))
                 parsed=Images();parsed.feed(page)
-                self.assertEqual(len(parsed.images),3)  # SVG plus two sources.
+                self.assertEqual(len(parsed.images),4)  # Two SVGs and two sources.
+                self.assertEqual(len([item for item in parsed.images
+                                      if item['class']=='source-preview']),2)
             with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
                 self.assertEqual(db.execute('SELECT name FROM names WHERE hash=? ORDER BY name',
                                             (first.source_hash,)).fetchall(),
@@ -61,7 +70,7 @@ class TraceCacheTests(TestCase):
         with TemporaryDirectory() as folder:
             result=trace(icon(),'#ffffff',cache_dir=folder,name='Existing icon')
             result.review_path.unlink()
-            (Path(folder)/'.review-pages-v1').unlink()
+            (Path(folder)/'.review-pages-v2').unlink()
             with TraceCache(folder):
                 pass
             self.assertIn('Existing icon',result.review_path.read_text())
@@ -74,8 +83,38 @@ class TraceCacheTests(TestCase):
             self.assertIsNotNone(result.review_path)
             page=result.review_path.read_text()
             self.assertIn('--icon-background:#101820',page)
-            self.assertIn('.preview{background:var(--icon-background)',page)
-            self.assertIn('.source img{image-rendering:pixelated;background:var(--icon-background)',page)
+            self.assertIn('img{max-width:none;background:var(--icon-background)',page)
+            self.assertIn('.source-preview{image-rendering:pixelated}',page)
+
+    def test_review_warns_when_original_metrics_describe_an_edited_svg(self):
+        with TemporaryDirectory() as folder:
+            first=trace(icon(),'#ffffff',cache_dir=folder)
+            other=trace(icon(),'#ffffff',cache_dir=folder,algorithm='smooth-palette')
+            first.svg_path.write_text(first.svg.replace('#1450dc','#ff0000'))
+            trace(icon(),'#ffffff',cache_dir=folder)
+            for page_path in (first.review_path,other.review_path):
+                page=page_path.read_text()
+                self.assertIn('SVG edited since tracing',page)
+                self.assertIn('initial quality metrics',page)
+                self.assertIn(f'src="{first.svg_path.name}"',page)
+                self.assertIn(f'src="{other.svg_path.name}"',page)
+
+    def test_old_cache_schema_migrates_and_rebuilds_review_pages(self):
+        with TemporaryDirectory() as folder:
+            first=trace(icon(),'#ffffff',cache_dir=folder)
+            second=trace(icon(),'#ffffff',cache_dir=folder,algorithm='smooth-palette')
+            # Rebuild an index with the columns used before the review update.
+            with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
+                db.execute('ALTER TABLE bitmaps DROP COLUMN match_kind')
+                db.execute('ALTER TABLE traces DROP COLUMN generated_hash')
+            (Path(folder)/'.review-pages-v2').unlink()
+            first.review_path.unlink()
+            second.review_path.unlink()
+            with TraceCache(folder):
+                pass
+            page=first.review_path.read_text()
+            self.assertIn('<dt>Match</dt><dd>unrecorded</dd>',page)
+            self.assertIn(f'src="{second.svg_path.name}"',page)
 
     def test_exact_fuzzy_and_offsets_retain_each_bitmap(self):
         with TemporaryDirectory() as folder:

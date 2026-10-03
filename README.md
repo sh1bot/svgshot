@@ -123,8 +123,9 @@ next conversion will use your changes. `--icon-cache-dir DIR` selects its
 location; `--no-icon-cache` disables it. The default is the system user cache
 directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops may
 contain visible screen content and accessible names, so inspect the cache
-before sharing it. A matching HTML review page beside each SVG shows every
-observed bitmap at 16× nearest-neighbour scale alongside the vector trace.
+before sharing it. A matching HTML review page beside each SVG compares all
+matched bitmap crops at 16× nearest-neighbour scale with every algorithm's SVG.
+It also shows accessible names, match offsets, trace settings, and quality metrics.
 
 For direct use in Python, `svgshot.tracing.trace(image, background,
 cache_dir=...)` accepts a cropped Pillow image and RGB colour (`"#ffffff"` or

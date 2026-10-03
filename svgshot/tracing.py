@@ -251,10 +251,12 @@ class TraceCache:
             CREATE TABLE IF NOT EXISTS bitmaps (
               hash TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id),
               background TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
-              dx REAL NOT NULL DEFAULT 0, dy REAL NOT NULL DEFAULT 0);
+              dx REAL NOT NULL DEFAULT 0, dy REAL NOT NULL DEFAULT 0,
+              match_kind TEXT NOT NULL DEFAULT 'unrecorded');
             CREATE TABLE IF NOT EXISTS traces (
               group_id TEXT NOT NULL REFERENCES groups(id), algorithm TEXT NOT NULL,
               status TEXT NOT NULL, hints TEXT NOT NULL DEFAULT '{}',
+              generated_hash TEXT,
               PRIMARY KEY (group_id, algorithm));
             CREATE TABLE IF NOT EXISTS names (
               hash TEXT NOT NULL REFERENCES bitmaps(hash), name TEXT NOT NULL,
@@ -263,7 +265,11 @@ class TraceCache:
         ''')
         if 'hints' not in [row[1] for row in self.db.execute('PRAGMA table_info(traces)')]:
             self.db.execute("ALTER TABLE traces ADD COLUMN hints TEXT NOT NULL DEFAULT '{}'")
-        review_marker = self.root/'.review-pages-v1'
+        if 'generated_hash' not in [row[1] for row in self.db.execute('PRAGMA table_info(traces)')]:
+            self.db.execute('ALTER TABLE traces ADD COLUMN generated_hash TEXT')
+        if 'match_kind' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
+            self.db.execute("ALTER TABLE bitmaps ADD COLUMN match_kind TEXT NOT NULL DEFAULT 'unrecorded'")
+        review_marker = self.root/'.review-pages-v2'
         if not review_marker.is_file():
             for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
                                           ('vector',)).fetchall():
@@ -293,7 +299,7 @@ class TraceCache:
     def _refresh_review_pages(self, group):
         background, = self.db.execute('SELECT background FROM groups WHERE id=?',
                                       (group,)).fetchone()
-        variants = self.db.execute('''SELECT hash,width,height,dx,dy FROM bitmaps
+        variants = self.db.execute('''SELECT hash,width,height,dx,dy,match_kind FROM bitmaps
             WHERE group_id=? ORDER BY CASE WHEN hash=? THEN 0 ELSE 1 END, hash''',
             (group,group)).fetchall()
         if not variants:
@@ -302,44 +308,87 @@ class TraceCache:
         for digest,name in self.db.execute('''SELECT n.hash,n.name FROM names n
             JOIN bitmaps b ON b.hash=n.hash WHERE b.group_id=? ORDER BY n.name''',(group,)):
             by_hash.setdefault(digest,[]).append(name)
-        for algorithm, in self.db.execute('SELECT algorithm FROM traces WHERE group_id=? AND status=?',
-                                          (group,'vector')):
+        traces = self.db.execute('''SELECT algorithm,status,hints,generated_hash FROM traces
+            WHERE group_id=? ORDER BY algorithm''',(group,)).fetchall()
+        w,h = variants[0][1:3]
+        observations = []
+        for index,(digest,width,height,dx,dy,match_kind) in enumerate(variants,1):
+            names = by_hash.get(digest,[])
+            label = ', '.join(names) if names else 'Unlabelled bitmap'
+            labels = ''.join(f'<li>{escape(name)}</li>' for name in names)
+            observations.append(
+                f'<article><h3>Bitmap {index}: {escape(label)}</h3>'
+                f'<img class="source-preview" src="../bitmaps/{digest}.png" '
+                f'width="{width*16}" height="{height*16}" '
+                f'alt="Source bitmap: {escape(label,quote=True)}">'
+                f'<dl><dt>Source SHA-256</dt><dd><code>{digest}</code></dd>'
+                f'<dt>Size</dt><dd>{width} × {height} pixels</dd>'
+                f'<dt>Match</dt><dd>{escape(match_kind)}</dd>'
+                f'<dt>Offset</dt><dd>({dx:g}, {dy:g}) pixels</dd></dl>'
+                f'{"<p>Accessible name(s):</p><ul>"+labels+"</ul>" if names else ""}'
+                '</article>')
+        diagnostics = (('approximation','Approximation'),('silhouette_iou','Silhouette IoU'),
+                       ('colour_error','Colour error'),('palette_size','Palette colours'),
+                       ('blur_radius','Blur radius'),('layering','Layering'),
+                       ('icon_opacity','Group opacity'),('clip_to_first','Clipped to silhouette'))
+        trace_cards = []
+        for algorithm,status,stored_hints,generated_hash in traces:
+            svg_path = self._svg_path(group,algorithm)
+            hints = json.loads(stored_hints)
+            pairs = [(label,hints[key]) for key,label in diagnostics if key in hints]
+            pairs.extend((key.replace('_',' ').capitalize(),value)
+                         for key,value in sorted(hints.items())
+                         if key not in dict(diagnostics))
+            details = ''.join(f'<dt>{escape(label)}</dt><dd>{escape(str(value))}</dd>'
+                              for label,value in pairs)
+            if status == 'vector' and svg_path.is_file():
+                current_svg = svg_path.read_bytes()
+                edited = bool(generated_hash and
+                              hashlib.sha256(current_svg).hexdigest()!=generated_hash)
+                body = (f'<img class="vector-preview" src="{escape(svg_path.name,quote=True)}" '
+                        f'width="{w*16}" height="{h*16}" '
+                        f'alt="SVG trace from {escape(algorithm,quote=True)}">'
+                        f'<p><a href="{escape(svg_path.name,quote=True)}">Open SVG</a> · '
+                        f'{len(current_svg)} bytes</p>'
+                        + ('<p class="edited">SVG edited since tracing; initial quality metrics '
+                           'may no longer describe it.</p>' if edited else '')
+                        + (f'<dl>{details}</dl>' if details else ''))
+            else:
+                body = '<p>No SVG met the trace quality threshold.</p>' if status != 'vector' else \
+                       '<p>The cached SVG file is missing.</p>'
+            trace_cards.append((algorithm,body))
+        for algorithm,status,_,_ in traces:
+            if status!='vector':
+                continue
             svg_path = self._svg_path(group,algorithm)
             if not svg_path.is_file():
                 continue
-            w,h = variants[0][1:3]
-            observations = []
-            for digest,width,height,dx,dy in variants:
-                names = by_hash.get(digest,[])
-                label = ', '.join(names) if names else 'Unlabelled bitmap'
-                labels = ''.join(f'<li>{escape(name)}</li>' for name in names)
-                observations.append(
-                    f'<article><h3>{escape(label)}</h3>'
-                    f'<p><code>{digest}</code> · offset ({dx:g}, {dy:g})</p>'
-                    f'<img src="../bitmaps/{digest}.png" width="{width*16}" height="{height*16}" '
-                    f'alt="Source bitmap: {escape(label,quote=True)}">'
-                    f'{"<ul>"+labels+"</ul>" if names else ""}</article>')
+            artwork = ''.join(
+                f'<article{ " class=\"selected\"" if name==algorithm else ""}'
+                f' data-algorithm="{escape(name,quote=True)}">'
+                f'<h3>{escape(name)}</h3>{body}</article>' for name,body in trace_cards)
             markup = ('<!doctype html><html lang="en"><meta charset="utf-8">'
-                      f'<title>Trace review: {escape(algorithm)}</title>'
+                      f'<title>Icon comparison: {escape(algorithm)}</title>'
                       f'<style>:root{{--icon-background:{background}}}'
                       'body{font:16px system-ui,sans-serif;color:#181818;background:#fafafa;'
-                      'margin:1.5rem}main{display:grid;grid-template-columns:max-content minmax(0,1fr);'
-                      'gap:2rem}section{min-width:0;overflow:auto}.trace{position:sticky;top:0;'
-                      'align-self:start}.preview{background:var(--icon-background);'
-                      'border:1px solid #777;max-width:none}'
-                      '.source{image-rendering:pixelated}.source img{image-rendering:pixelated;'
-                      'background:var(--icon-background);max-width:none;'
-                      'border:1px solid #777}.source article{margin-bottom:2rem}'
-                      'code{overflow-wrap:anywhere}h3{font-size:1rem}'
-                      '@media(max-width:700px){main{display:block}.trace{position:static}}'
+                      'margin:1.5rem}main{display:grid;grid-template-columns:minmax(0,1fr) '
+                      'minmax(0,1fr);gap:1.5rem}section{min-width:0}article{overflow:auto;'
+                      'margin-bottom:1.5rem;border:1px solid #aaa;padding:1rem;background:#fff}'
+                      'article.selected{border:3px solid #2669ac}img{max-width:none;'
+                      'background:var(--icon-background);border:1px solid #777}'
+                      '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
+                      'dd{margin:0 0 .35rem 0}dl{margin:.6rem 0;display:grid;'
+                      'grid-template-columns:max-content minmax(0,1fr);column-gap:.7rem}'
+                      'code{overflow-wrap:anywhere}.edited{font-weight:bold;color:#a33}'
+                      '@media(max-width:700px){main{display:block}}'
                       '</style>'
-                      f'<h1>Trace review</h1><p>Algorithm: <code>{escape(algorithm)}</code>. '
-                      f'{len(variants)} source bitmap(s), shown at 16×.</p><main>'
-                      f'<section class="trace"><h2>SVG trace</h2><img class="preview" '
-                      f'src="{escape(svg_path.name,quote=True)}" width="{w*16}" height="{h*16}" '
-                      f'alt="SVG trace"><p><a href="{escape(svg_path.name,quote=True)}">Open SVG</a></p></section>'
-                      '<section class="source"><h2>Observed bitmaps</h2>'
-                      + ''.join(observations) + '</section></main></html>\n')
+                      f'<h1>Icon comparison</h1><p>Canonical group: <code>{group}</code>. '
+                      f'Background: <code>{background}</code>. '
+                      f'{len(variants)} source bitmap(s) and {len(traces)} trace result(s). '
+                      'Images are shown at 16×; bitmap scaling uses nearest neighbour.</p>'
+                      '<main><section><h2>Observed bitmaps</h2>'
+                      + ''.join(observations) + '</section><section><h2>Algorithm results</h2>'
+                      + artwork + '</section></main></html>\n')
             page = svg_path.with_suffix('.html')
             data = markup.encode('utf-8')
             if not page.is_file() or page.read_bytes()!=data:
@@ -407,8 +456,10 @@ class TraceCache:
             _atomic_bytes(self._bitmap_path(group,digest),output.getvalue())
             with self.db:
                 self.db.execute('INSERT OR IGNORE INTO groups VALUES (?,?,?)',(group,rgb,group))
-                self.db.execute('INSERT OR IGNORE INTO bitmaps VALUES (?,?,?,?,?,?,?)',
-                                (digest,group,rgb,image.width,image.height,dx,dy))
+                self.db.execute('''INSERT OR IGNORE INTO bitmaps
+                    (hash,group_id,background,width,height,dx,dy,match_kind)
+                    VALUES (?,?,?,?,?,?,?,?)''',
+                    (digest,group,rgb,image.width,image.height,dx,dy,match or 'new'))
         if isinstance(name,str):
             name = ' '.join(name.split())
             if name:
@@ -421,10 +472,14 @@ class TraceCache:
             if candidate_svg:
                 _atomic_bytes(self._svg_path(group,key),candidate_svg.encode('utf-8'))
             with self.db:
-                self.db.execute('''INSERT INTO traces (group_id,algorithm,status,hints)
-                    VALUES (?,?,?,?) ON CONFLICT(group_id,algorithm) DO UPDATE SET
-                    status=excluded.status,hints=excluded.hints''',
-                    (group,key,status,json.dumps(hints)))
+                self.db.execute('''INSERT INTO traces
+                    (group_id,algorithm,status,hints,generated_hash)
+                    VALUES (?,?,?,?,?) ON CONFLICT(group_id,algorithm) DO UPDATE SET
+                    status=excluded.status,hints=excluded.hints,
+                    generated_hash=excluded.generated_hash''',
+                    (group,key,status,json.dumps(hints),
+                     hashlib.sha256(candidate_svg.encode('utf-8')).hexdigest()
+                     if candidate_svg else None))
         else:
             status,hints = existing[0],json.loads(existing[1])
         svg = self._svg_path(group,key).read_text(encoding='utf-8') if status=='vector' else None
