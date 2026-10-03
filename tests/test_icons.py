@@ -6,7 +6,8 @@ from xml.etree import ElementTree as ET
 from PIL import Image, ImageDraw
 import numpy as np
 from svgshot.artwork import trace_artwork
-from svgshot.icons import simplify_icon, simplify_scene_artwork, _distinct_palette, _smooth_quantize
+from svgshot.icons import (simplify_icon, simplify_scene_artwork, _distinct_palette,
+                           _smooth_quantize, _fit_curve, _sample_segment)
 from svgshot.model import Node
 from svgshot.svg import to_svg
 from svgshot.validate import render
@@ -20,6 +21,29 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_line_fit_tolerates_noise_and_checks_endpoint_overshoot(self):
+        points = np.array([[0., 0.], [2., .2], [4., -.2], [6., 0.]])
+        segments = _fit_curve(points, np.array([1., 0.]), np.array([-1., 0.]), .25)
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]), 2)
+        np.testing.assert_allclose(_sample_segment(segments[0], [0, .5, 1]), [[0, 0], [3, 0], [6, 0]])
+        # Distance to the infinite line would be zero; the finite segment must
+        # reject a contour point extending past its endpoint.
+        overshoot = np.array([[0., 0.], [8., 0.], [6., 0.]])
+        segments = _fit_curve(overshoot, np.array([1., 0.]), np.array([-1., 0.]), .25)
+        self.assertFalse(len(segments) == 1 and len(segments[0]) == 2)
+
+    def test_smooth_rectangle_uses_lines_and_preserves_rendered_edges(self):
+        image = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
+        ImageDraw.Draw(image).rectangle((5, 5, 26, 26), fill=(20, 80, 220, 255))
+        icon = simplify_icon(image, (0, 0, 32, 32), smooth=True)
+        self.assertEqual(icon.kind, 'capture-artwork')
+        self.assertTrue(any('L' in p['d'] for p in icon.vector_data['paths']))
+        result = render_svg(to_svg(Node('window', (0, 0, 32, 32), color='#ffffff', children=[icon])), 32)
+        np.testing.assert_allclose(result[16, 16, :3], [20, 80, 220], atol=3)
+        self.assertTrue((result[1, 16, :3] > 240).all())
+        self.assertLess(sum(len(p['d']) for p in icon.vector_data['paths']), 350)
+
     def test_distinct_palette_uses_source_colours_and_ignores_hidden_rgb(self):
         image = Image.new('RGBA', (12, 12), (255, 0, 255, 0))
         draw = ImageDraw.Draw(image)

@@ -7,7 +7,7 @@ Photographs and explicit fidelity overlays do not enter this path.
 
 Developer metrics: accept silhouette IoU >= .82 and mean premultiplied RGB/
 alpha error <= .16 over foreground pixels, with at most 500 polygon vertices
-or 500 cubic spans in the optional smoothing experiment. Compare
+or 500 straight/curved spans in the optional smoothing experiment. Compare
 at the original icon size after 4x supersampling; transparent RGB is ignored.
 These bounds preserve recognisability rather than reproducing every pixel.
 """
@@ -193,8 +193,19 @@ def _bezier(control, t):
             + 3*(1-t)*t**2 * control[2] + t**3 * control[3])
 
 
-def _fit_curve(points, left, right, tolerance):
-    """Fit endpoint-tangent cubic segments, splitting at the largest residual."""
+def _fit_curve(points, left, right, tolerance, *, prefer_lines=True):
+    """Prefer a line within tolerance; otherwise fit and split cubic segments.
+
+    Lines have two endpoints; cubics have four control points. Line error is
+    nearest distance to the finite segment, in original-image pixels, including
+    endpoint overshoot. Rendering and SVG export use the same chosen geometry.
+    """
+    delta = points[-1] - points[0]
+    length = float(np.dot(delta, delta))
+    position = np.clip((points-points[0]) @ delta / max(length, 1e-9), 0, 1)
+    line_error = np.linalg.norm(points-(points[0]+position[:, None]*delta), axis=1)
+    if prefer_lines and float(line_error.max()) <= tolerance:
+        return [points[[0, -1]]]
     def unit(vector):
         return vector / max(float(np.linalg.norm(vector)), 1e-9)
     left, right = unit(left), unit(right)
@@ -217,11 +228,18 @@ def _fit_curve(points, left, right, tolerance):
     if error[split] <= tolerance:
         return [control]
     tangent = unit(points[split+1]-points[split-1])
-    return (_fit_curve(points[:split+1], left, -tangent, tolerance)
-            + _fit_curve(points[split:], tangent, right, tolerance))
+    return (_fit_curve(points[:split+1], left, -tangent, tolerance, prefer_lines=prefer_lines)
+            + _fit_curve(points[split:], tangent, right, tolerance, prefer_lines=prefer_lines))
 
 
-def _curve_contour(points, tolerance):
+def _sample_segment(segment, t):
+    if len(segment) == 2:
+        t = np.asarray(t)[:, None]
+        return (1-t)*segment[0] + t*segment[1]
+    return _bezier(segment, t)
+
+
+def _curve_contour(points, tolerance, *, prefer_lines=True):
     # Measure turns across a source-pixel neighbourhood, rather than preserving
     # every right angle on the 4x quantized staircase as an intentional corner.
     previous, following = points-np.roll(points, 1, axis=0), np.roll(points, -1, axis=0)-points
@@ -247,7 +265,7 @@ def _curve_contour(points, tolerance):
         span = points[start:end+1] if end > start else np.concatenate((points[start:], points[:end+1]))
         left = span[1]-span[0] if start in corners else following[start]+previous[start]
         right = span[-2]-span[-1] if end in corners else -following[end]-previous[end]
-        curves.extend(_fit_curve(span, left, right, tolerance))
+        curves.extend(_fit_curve(span, left, right, tolerance, prefer_lines=prefer_lines))
     return curves
 
 
@@ -282,15 +300,18 @@ def _smooth_candidate(image, box, palette_size, blur):
                     contours.append(_simplify(p, .12))
             raw.append((tuple(int(c) for c in color)+(alpha,), [p for p in contours if len(p) >= 3]))
     best = None
-    for tolerance in (.75, .4, .2):
-        fitted = [(color, [_curve_contour(p, tolerance) for p in contours]) for color, contours in raw]
-        # A cubic has three control/end points but represents a curved span;
-        # count spans against the same 500-element complexity budget.
+    # Try lines first, retaining curve-only fits when replacing curves with
+    # lines fails the overall silhouette/colour checks. Select by path bytes.
+    candidates = [(lines, t) for lines in (True, False) for t in (.75, .4, .2)]
+    for prefer_lines, tolerance in candidates:
+        fitted = [(color, [_curve_contour(p, tolerance, prefer_lines=prefer_lines)
+                           for p in contours]) for color, contours in raw]
+        # Count both straight and curved spans against the complexity budget.
         complexity = sum(len(curves) for _, contours in fitted for curves in contours)
         if complexity > 500:
             continue
         # Sample fitted curves for the existing original-size quality check.
-        layers = [(color, [np.concatenate([_bezier(c, np.linspace(0, 1, max(8,
+        layers = [(color, [np.concatenate([_sample_segment(c, np.linspace(0, 1, max(8,
             int(np.linalg.norm(np.diff(c, axis=0), axis=1).sum()*8)+1)))[:-1] for c in curves])
             for curves in contours]) for color, contours in fitted]
         iou, error = _quality(target, _render(layers, (w, h)))
@@ -304,7 +325,8 @@ def _smooth_candidate(image, box, palette_size, blur):
             for curves in contours:
                 parts.append('M' + ','.join(number(v) for v in curves[0][0]))
                 for curve in curves:
-                    parts.append('C'+' '.join(','.join(number(v) for v in p) for p in curve[1:]))
+                    command = 'L' if len(curve) == 2 else 'C'
+                    parts.append(command+' '.join(','.join(number(v) for v in p) for p in curve[1:]))
                 parts.append('Z')
             if parts:
                 paths.append({'d':''.join(parts), 'fill':'#%02x%02x%02x'%color[:3],
