@@ -86,10 +86,13 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
             opacity = f' fill-opacity="{path["opacity"]}"' if 'opacity' in path else ''
             edges = '' if node.vector_data.get('local') else ' shape-rendering="crispEdges"'
             output.append(f'<path data-kind="capture-artwork"{edges} d="{path["d"]}" fill="{path["fill"]}" fill-rule="evenodd"{stroke}{opacity}/>')
-        return '\n'.join(output)
+        paths = '\n'.join(output)
+        opacity = node.vector_data.get('icon_opacity', 1)
+        return f'<g opacity="{opacity}">{paths}</g>' if opacity != 1 else paths
 
     def artwork_key(node):
-        return json.dumps([node.vector_data['icon_size'],node.vector_data['paths']],sort_keys=True,separators=(',',':'))
+        return json.dumps([node.vector_data['icon_size'],node.vector_data['paths'],
+                           node.vector_data.get('icon_opacity', 1)],sort_keys=True,separators=(',',':'))
     icons = [n for n in flatten(root) if n.kind == 'capture-artwork' and n.vector_data.get('local')]
     counts = Counter(artwork_key(n) for n in icons)
     definitions = {}

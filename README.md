@@ -108,6 +108,8 @@ Inspect the SVG at its intended size before relying on it.
 Both icon tracers use foreground-only median-cut palettes, automatically trying
 4, 8 and 12 colours (one for monochrome icons). Use `--icon-palette-size N` to
 set a fixed palette size for either tracer.
+Colours are drawn in overlapping layers to avoid seams between neighbouring
+fills while preserving transparent holes.
 
 For experimental icon smoothing, use `--smooth-icons`. It blurs by 0.5 source
 pixels, enlarges 4× with bicubic interpolation, quantises without dithering,

@@ -16,6 +16,7 @@ import io
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
+from scipy import ndimage
 
 from .model import Node
 
@@ -72,7 +73,7 @@ def _simplify(points, tolerance):
     return np.concatenate((first[:-1],last[:-1]))
 
 
-def _render(layers, size):
+def _render(layers, size, opacity=1.):
     w,h = size
     output = Image.new('RGBA',(w*4,h*4))
     for color, contours in layers:
@@ -84,7 +85,72 @@ def _render(layers, size):
         layer = Image.new('RGBA',output.size,tuple(color))
         layer.putalpha(Image.fromarray(mask.astype('uint8')*int(color[3])))
         output.alpha_composite(layer)
+    if opacity != 1.:
+        output.putalpha(output.getchannel('A').point(lambda value: round(value*opacity)))
     return output.resize(size,Image.Resampling.LANCZOS)
+
+
+def _mask_complexity(mask):
+    """Cheap contour cost: grid corners, then boundary length (including holes)."""
+    padded = np.pad(mask, 1)
+    a, b = padded[:-1, :-1], padded[:-1, 1:]
+    c, d = padded[1:, :-1], padded[1:, 1:]
+    count = a.astype('uint8') + b + c + d
+    corners = int(((count == 1) | (count == 3)).sum())
+    corners += 2*int(((a == d) & (b == c) & (a != b)).sum())
+    perimeter = int((padded[1:] != padded[:-1]).sum() +
+                    (padded[:, 1:] != padded[:, :-1]).sum())
+    return corners, perimeter
+
+
+def _stacked_masks(pixels, indices, colors, visible, *, alpha_source=None):
+    """Greedy encirclement order, with cumulative underpainting of later colours.
+
+    Count enclosed colours first, then enclosed area. Break ties by the contour
+    cost left for subsequent layers, exposed boundary and own area. This is a
+    deterministic heuristic, not a globally optimal ordering. Genuine
+    transparency is always outside every fill mask.
+    Uniform translucent colours are composited once at group level; otherwise
+    underpaint only later opaque regions so alpha cannot accumulate there.
+    """
+    active = [i for i in range(len(colors)) if (visible & (indices == i)).any()]
+    alphas = {i:int(np.percentile(pixels[:, :, 3][visible & (indices == i)], 90)) for i in active}
+    if alpha_source is not None:
+        # Resampling can introduce small alpha overshoots. Determine layer
+        # opacity from the original pixels, before blur and bicubic scaling.
+        source = np.asarray(alpha_source)
+        source_visible = source[:, :, 3] > max(8, float(source[:, :, 3].max())*.35)
+        source_indices = ((source[:, :, :3].astype(float)[:, :, None] -
+                           colors[None, None])**2).sum(axis=3).argmin(axis=2)
+        for i in active:
+            values = source[:, :, 3][source_visible & (source_indices == i)]
+            if values.size:
+                alphas[i] = int(np.percentile(values, 90))
+    uniform = len(active) > 1 and len(set(alphas.values())) == 1
+    opacity = next(iter(alphas.values()))/255 if uniform else 1.
+    opaque = np.zeros_like(visible)
+    for i in active:
+        if uniform or alphas[i] == 255:
+            opaque |= indices == i
+    remaining = visible.copy()
+    layers = []
+    while active:
+        boundary = remaining & ~ndimage.binary_erosion(remaining)
+        def score(index):
+            own = remaining & (indices == index)
+            enclosed = ndimage.binary_fill_holes(own) & remaining & ~own
+            corners, perimeter = _mask_complexity(remaining & ~own)
+            return (len(np.unique(indices[enclosed])), int(enclosed.sum()),
+                    -corners, -perimeter,
+                    int((own & boundary).sum()), int(own.sum()), -index)
+        index = max(active, key=score)
+        own = remaining & (indices == index)
+        mask = own | (remaining & opaque)
+        color = tuple(int(c) for c in colors[index]) + (255 if uniform else alphas[index],)
+        layers.append((color, mask))
+        remaining &= indices != index
+        active.remove(index)
+    return layers, opacity
 
 
 def _quality(target, rendered):
@@ -320,11 +386,11 @@ def _smooth_candidate(target, box, palette_size, blur):
     prepared = _smooth_quantize(target, palette, blur)
     pixels = np.asarray(prepared)
     visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
+    indices = ((pixels[:, :, :3].astype(float)[:, :, None]-palette[None, None])**2).sum(axis=3).argmin(axis=2)
+    masks, opacity = _stacked_masks(pixels, indices, palette, visible, alpha_source=target)
     raw = []
-    for color in palette:
-        mask = visible & np.all(pixels[:, :, :3] == color, axis=2)
+    for color, mask in masks:
         if mask.any():
-            alpha = int(np.percentile(pixels[:, :, 3][mask], 90))
             contours = []
             for contour in _contours(mask):
                 p = contour / 4
@@ -334,7 +400,7 @@ def _smooth_candidate(target, box, palette_size, blur):
                 # the original-image quality check still bounds lost detail.
                 if area >= .25:
                     contours.append(_simplify(p, .12))
-            raw.append((tuple(int(c) for c in color)+(alpha,), [p for p in contours if len(p) >= 3]))
+            raw.append((color, [p for p in contours if len(p) >= 3]))
     best = None
     # Try lines first, retaining curve-only fits when replacing curves with
     # lines fails the overall silhouette/colour checks. Select by path bytes.
@@ -350,7 +416,7 @@ def _smooth_candidate(target, box, palette_size, blur):
         layers = [(color, [np.concatenate([_sample_segment(c, np.linspace(0, 1, max(8,
             int(np.linalg.norm(np.diff(c, axis=0), axis=1).sum()*8)+1)))[:-1] for c in curves])
             for curves in contours]) for color, contours in fitted]
-        iou, error = _quality(target, _render(layers, (w, h)))
+        iou, error = _quality(target, _render(layers, (w, h), opacity))
         if iou < .82 or error > .16:
             continue
         paths = []
@@ -371,7 +437,9 @@ def _smooth_candidate(target, box, palette_size, blur):
         if best is None or size < best[0]:
             best = (size, Node('capture-artwork', box, vector_data={'paths':paths, 'local':True,
                 'icon_size':[w, h], 'approximation':'smooth-palette', 'palette_size':len(palette),
-                'blur_radius':blur, 'silhouette_iou':round(iou, 3), 'colour_error':round(error, 3)}))
+                'blur_radius':blur, 'layering':'encirclement',
+                **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
+                'silhouette_iou':round(iou, 3), 'colour_error':round(error, 3)}))
     return best
 
 
@@ -384,13 +452,12 @@ def _vector_candidate(target, monochrome, box, palette_size=None):
         colors = _icon_palette(target, count)
         distances = ((pixels[:,:,:3].astype(float)[:,:,None,:]-colors[None,None,:,:])**2).sum(axis=3)
         indices = distances.argmin(axis=2)
-        raw = [(tuple(int(v) for v in color)+(int(np.percentile(pixels[:,:,3][visible & (indices==i)],90)),),
-                _contours(visible & (indices==i))) for i,color in enumerate(colors)
-               if (visible & (indices==i)).any()]
+        masks, opacity = _stacked_masks(pixels, indices, colors, visible)
+        raw = [(color, _contours(mask)) for color, mask in masks]
         for tolerance in (1.,.65,.35):
             layers = [(color,[_simplify(p,tolerance) for p in paths]) for color,paths in raw]
             layers = [(color,[p for p in paths if len(p)>=3]) for color,paths in layers]
-            rendered = _render(layers,(w,h))
+            rendered = _render(layers,(w,h),opacity)
             iou,error = _quality(target,rendered)
             vertices = sum(len(p) for _,paths in layers for p in paths)
             if iou < .82 or error > .16 or vertices > 500:
@@ -405,6 +472,8 @@ def _vector_candidate(target, monochrome, box, palette_size=None):
             if best is None or size < best[0]:
                 best = (size,Node('capture-artwork',box,vector_data={'paths':paths,'local':True,
                     'icon_size':[w,h],'approximation':'monochrome' if monochrome else 'colour',
+                    'layering':'encirclement',
+                    **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                     'silhouette_iou':round(iou,3),'colour_error':round(error,3)}))
     return best
 

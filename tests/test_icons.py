@@ -8,7 +8,7 @@ import numpy as np
 from svgshot.artwork import trace_artwork
 from svgshot.icons import (simplify_icon, simplify_scene_artwork, _icon_palette,
                            _smooth_quantize, _fit_curve, _sample_segment,
-                           _bezier, _background_color, _target)
+                           _bezier, _background_color, _target, _stacked_masks)
 from svgshot.model import Node
 from svgshot.svg import to_svg
 from svgshot.validate import render
@@ -22,6 +22,92 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_encircling_colours_underpaint_without_filling_transparent_holes(self):
+        colors = np.array([[220, 60, 20], [20, 80, 220], [220, 180, 20]])
+        indices = np.full((24, 24), 2)
+        indices[5:19, 5:19] = 1
+        indices[9:15, 9:15] = 0
+        pixels = np.dstack((colors[indices], np.full(indices.shape, 255))).astype('uint8')
+        visible = np.ones(indices.shape, dtype=bool)
+        visible[11:13, 11:13] = False
+        layers, opacity = _stacked_masks(pixels, indices, colors, visible)
+        self.assertEqual([c[:3] for c, _ in layers], [tuple(colors[i]) for i in (2, 1, 0)])
+        self.assertEqual(opacity, 1)
+        np.testing.assert_array_equal(layers[0][1], visible)
+        self.assertTrue(layers[1][1][9, 9], 'middle layer must fill beneath the centre')
+        for _, mask in layers:
+            self.assertFalse(mask[11, 11], 'a genuine transparent hole was underpainted')
+        composite = np.zeros_like(pixels)
+        for color, mask in layers:
+            composite[mask] = color
+        np.testing.assert_array_equal(composite[visible], pixels[visible])
+
+    def test_ambiguous_order_leaves_the_simpler_contour_for_later(self):
+        colors = np.array([[20, 80, 220], [220, 60, 20]])
+        indices = np.zeros((24, 24), dtype=int)
+        # Both colours touch the outer boundary and enclose nothing. The red
+        # rectangle is simpler than the blue region with a rectangular notch.
+        indices[6:18, 12:] = 1
+        pixels = np.dstack((colors[indices], np.full(indices.shape, 255))).astype('uint8')
+        layers, _ = _stacked_masks(pixels, indices, colors, np.ones(indices.shape, dtype=bool))
+        self.assertEqual(layers[0][0][:3], tuple(colors[0]))
+        self.assertTrue(layers[0][1].all())
+        np.testing.assert_array_equal(layers[1][1], indices == 1)
+
+    def test_uniform_translucent_layers_share_opacity_and_do_not_accumulate_alpha(self):
+        image = Image.new('RGBA', (32, 32))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((4, 4, 27, 27), fill=(20, 80, 220, 128))
+        draw.rectangle((12, 12, 19, 19), fill=(220, 60, 20, 128))
+        for smooth in (False, True):
+            with self.subTest(smooth=smooth):
+                icon = simplify_icon(image, (0, 0, 32, 32), smooth=smooth, palette_size=2)
+                self.assertEqual(icon.kind, 'capture-artwork')
+                self.assertAlmostEqual(icon.vector_data['icon_opacity'], 128/255, places=5)
+                self.assertTrue(all('opacity' not in p for p in icon.vector_data['paths']))
+                result = render_svg(to_svg(Node('window', (0, 0, 32, 32), color='#ffffff', children=[icon])), 32)
+                np.testing.assert_allclose(result[16, 16, :3], [237, 157, 137], atol=3)
+                np.testing.assert_allclose(result[8, 8, :3], [137, 167, 237], atol=3)
+
+    def test_mixed_opacity_does_not_underpaint_a_translucent_later_colour(self):
+        colors = np.array([[20, 80, 220], [220, 60, 20]])
+        indices = np.zeros((24, 24), dtype=int)
+        indices[8:16, 8:16] = 1
+        alpha = np.where(indices == 0, 255, 128)
+        pixels = np.dstack((colors[indices], alpha)).astype('uint8')
+        layers, opacity = _stacked_masks(pixels, indices, colors, np.ones(indices.shape, dtype=bool))
+        self.assertEqual(opacity, 1)
+        self.assertEqual(layers[0][0][3], 255)
+        self.assertFalse(layers[0][1][12, 12])
+        self.assertTrue(layers[1][1][12, 12])
+        self.assertEqual(layers[1][0][3], 128)
+
+    def test_shared_icon_definitions_preserve_distinct_group_opacities(self):
+        data = {'local': True, 'icon_size': [16, 16], 'icon_opacity': .5,
+                'paths': [{'d': 'M2,2H14V14H2Z', 'fill': '#000000'},
+                          {'d': 'M6,6H10V10H6Z', 'fill': '#ff0000'}]}
+        icons = [Node('capture-artwork', (i*16, 0, 16, 16),
+                      vector_data={**data, 'icon_opacity': .5 if i < 2 else .25})
+                 for i in range(4)]
+        svg = to_svg(Node('window', (0, 0, 64, 16), color='#ffffff', children=icons))
+        result = render_svg(svg, 64)
+        for i in range(4):
+            np.testing.assert_allclose(result[8, i*16+8, :3],
+                                       [255, 127, 127] if i < 2 else [255, 191, 191], atol=2)
+
+    def test_adjacent_colour_layers_have_no_background_seam(self):
+        image = Image.new('RGBA', (32, 32))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((4, 4, 15, 27), fill=(20, 0, 220, 255))
+        draw.rectangle((16, 4, 27, 27), fill=(220, 0, 20, 255))
+        for smooth in (False, True):
+            with self.subTest(smooth=smooth):
+                icon = simplify_icon(image, (0, 0, 32, 32), smooth=smooth, palette_size=2)
+                self.assertEqual(icon.kind, 'capture-artwork')
+                result = render_svg(to_svg(Node('window', (0, 0, 32, 32), color='#00ff00', children=[icon])), 128)
+                self.assertLess(int(result[32:96, 60:68, 1].max()), 3,
+                                'background leaked through the shared colour boundary')
+
     def test_reparameterisation_fits_one_known_cubic(self):
         control = np.array([[0., 0.], [0., 8.], [8., 8.], [8., 0.]])
         points = _bezier(control, np.linspace(0, 1, 41)**2)
