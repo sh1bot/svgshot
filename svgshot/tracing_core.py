@@ -264,6 +264,23 @@ def _smooth_quantize(patch, palette, blur):
     return Image.fromarray(np.rint(pixels).astype('uint8'))
 
 
+def _palette_image(indices, palette, alpha):
+    """Show palette assignments with either source alpha or the contour cutoff."""
+    rgb = palette[indices].astype('uint8')
+    return Image.fromarray(np.dstack((rgb,alpha.astype('uint8'))),'RGBA')
+
+
+def _boundary_previews(target, quantized, indices, palette, visible, masks):
+    pixels = np.asarray(quantized.convert('RGBA'))
+    return {'target':target.copy(),
+            'quantized':_palette_image(indices,palette,pixels[:,:,3]),
+            'islands':_palette_image(indices,palette,visible.astype('uint8')*255),
+            'layers':[Image.fromarray(np.dstack((
+                np.broadcast_to(np.asarray(color[:3],dtype='uint8'),
+                                (*mask.shape,3)),mask.astype('uint8')*255)),'RGBA')
+                      for color,mask in masks]}
+
+
 def _bezier(control, t):
     t = np.asarray(t)[:, None]
     return ((1-t)**3 * control[0] + 3*(1-t)**2*t * control[1]
@@ -381,7 +398,7 @@ def _curve_contour(points, tolerance, *, prefer_lines=True):
     return curves
 
 
-def _smooth_candidate(target, box, palette_size, blur):
+def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
     x, y, w, h = box
     palette = _icon_palette(target, palette_size)
     if not len(palette):
@@ -447,10 +464,12 @@ def _smooth_candidate(target, box, palette_size, blur):
                 **({'clip_to_first':True} if clip_to_first else {}),
                 **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                 'silhouette_iou':round(iou, 3), 'colour_error':round(error, 3)}))
+    if best is not None and capture:
+        best = (*best,_boundary_previews(target,prepared,indices,palette,visible,masks))
     return best
 
 
-def _vector_candidate(target, monochrome, box, palette_size=None):
+def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=False):
     x,y,w,h = box
     pixels = np.asarray(target)
     visible = pixels[:,:,3] > max(8,float(pixels[:,:,3].max())*.35)
@@ -480,15 +499,21 @@ def _vector_candidate(target, monochrome, box, palette_size=None):
             if best is None or size < best[0]:
                 best = (size,Node('capture-artwork',box,vector_data={'paths':paths,'local':True,
                     'icon_size':[w,h],'approximation':'monochrome' if monochrome else 'colour',
-                    'layering':'encirclement',
+                    'layering':'encirclement','palette_size':len(colors),
                     **({'clip_to_first':True} if clip_to_first else {}),
                     **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                     'silhouette_iou':round(iou,3),'colour_error':round(error,3)}))
+                if capture:
+                    chosen = (indices.copy(),colors.copy(),visible.copy(),list(masks))
+    if best is not None and capture:
+        indices,colors,visible,masks = chosen
+        quantized = _palette_image(indices,colors,pixels[:,:,3])
+        best = (*best,_boundary_previews(target,quantized,indices,colors,visible,masks))
     return best
 
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None, blur=.5,
-                  background=None):
+                  background=None, previews=None):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
     if ((palette_size is not None and (not isinstance(palette_size, int) or not 2 <= palette_size <= 32))
@@ -499,8 +524,10 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
         return None
     def candidate(target, monochrome):
         if not smooth:
-            return _vector_candidate(target, monochrome, box, palette_size)
-        choices = [_smooth_candidate(target, box, count, blur)
+            return _vector_candidate(target, monochrome, box, palette_size,
+                                     capture=previews is not None)
+        choices = [_smooth_candidate(target, box, count, blur,
+                                     capture=previews is not None)
                    for count in _palette_counts(monochrome, palette_size)]
         return min((choice for choice in choices if choice is not None),
                    key=lambda choice: choice[0], default=None)
@@ -509,6 +536,8 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
         target, _ = _target(image, box, force_colour=True, background=background)
         best = candidate(target, False)
     if best:
+        if previews is not None:
+            previews.update(best[2])
         return best[1]
     if not allow_raster:
         return None

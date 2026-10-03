@@ -12,6 +12,7 @@ import numpy as np
 from svgshot.model import Node
 from svgshot.svg import to_svg
 from svgshot.tracing import trace, TraceCache, _bitmap_match, _fingerprint, _fingerprint_might_match
+from svgshot.tracing_core import _target, _icon_palette, _smooth_quantize
 from svgshot.validate import render
 
 
@@ -55,9 +56,13 @@ class TraceCacheTests(TestCase):
                     def handle_starttag(self,tag,attrs):
                         if tag=='img':self.images.append(dict(attrs))
                 parsed=Images();parsed.feed(page)
-                self.assertEqual(len(parsed.images),4)  # Two SVGs and two sources.
+                self.assertGreaterEqual(len(parsed.images),10)
                 self.assertEqual(len([item for item in parsed.images
                                       if item['class']=='source-preview']),2)
+                self.assertEqual(len([item for item in parsed.images
+                                      if item['class']=='vector-preview']),2)
+                self.assertGreaterEqual(len([item for item in parsed.images
+                                             if item['class']=='stage-preview']),6)
             with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
                 self.assertEqual(db.execute('SELECT name FROM names WHERE hash=? ORDER BY name',
                                             (first.source_hash,)).fetchall(),
@@ -70,10 +75,51 @@ class TraceCacheTests(TestCase):
         with TemporaryDirectory() as folder:
             result=trace(icon(),'#ffffff',cache_dir=folder,name='Existing icon')
             result.review_path.unlink()
-            (Path(folder)/'.review-pages-v2').unlink()
+            (Path(folder)/'.review-pages-v3').unlink()
             with TraceCache(folder):
                 pass
             self.assertIn('Existing icon',result.review_path.read_text())
+
+    def test_saved_intermediates_show_exact_palette_input_and_contour_masks(self):
+        with TemporaryDirectory() as folder:
+            source=icon()
+            ordinary=trace(source,'#ffffff',cache_dir=folder)
+            smooth=trace(source,'#ffffff',algorithm='smooth-palette',cache_dir=folder)
+            for result,scale in ((ordinary,1),(smooth,4)):
+                base=result.svg_path.with_suffix('')
+                stage_paths=[base.with_name(base.name+f'.{stage}.png')
+                             for stage in ('target','quantized','islands','layer-00')]
+                self.assertTrue(all(path.is_file() for path in stage_paths))
+                with Image.open(stage_paths[0]) as target_image:
+                    expected,_=_target(source,(0,0,24,24),background=(255,255,255))
+                    np.testing.assert_array_equal(np.asarray(target_image),np.asarray(expected))
+                with Image.open(stage_paths[1]) as quantized, Image.open(stage_paths[2]) as islands, \
+                     Image.open(stage_paths[3]) as layer:
+                    self.assertEqual(quantized.size,(24*scale,24*scale))
+                    self.assertEqual(islands.size,quantized.size)
+                    np.testing.assert_array_equal(np.asarray(islands)[:,:,:3],
+                                                  np.asarray(quantized)[:,:,:3])
+                    self.assertEqual(set(np.unique(np.asarray(islands)[:,:,3])),{0,255})
+                    self.assertEqual(set(np.unique(np.asarray(layer)[:,:,3])),{0,255})
+                    if scale==4:
+                        palette=_icon_palette(expected,1)
+                        np.testing.assert_array_equal(np.asarray(quantized),
+                            np.asarray(_smooth_quantize(expected,palette,.5)))
+                self.assertIn(f'{base.name}.islands.png',result.review_path.read_text())
+                self.assertIn(f'{base.name}.layer-00.png',result.review_path.read_text())
+
+    def test_old_svg_backfill_keeps_an_edited_trace(self):
+        with TemporaryDirectory() as folder:
+            result=trace(icon(),'#ffffff',cache_dir=folder)
+            result.svg_path.write_text(result.svg.replace('#1450dc','#ff0000'))
+            preview=result.svg_path.with_name(result.svg_path.stem+'.target.png')
+            preview.unlink()
+            (Path(folder)/'.review-pages-v3').unlink()
+            with TraceCache(folder):
+                pass
+            self.assertTrue(preview.is_file())
+            self.assertIn('#ff0000',result.svg_path.read_text())
+            self.assertIn('SVG edited since tracing',result.review_path.read_text())
 
     def test_review_uses_the_intended_background_for_transparent_images(self):
         with TemporaryDirectory() as folder:
@@ -107,7 +153,7 @@ class TraceCacheTests(TestCase):
             with sqlite3.connect(Path(folder)/'index.sqlite3') as db:
                 db.execute('ALTER TABLE bitmaps DROP COLUMN match_kind')
                 db.execute('ALTER TABLE traces DROP COLUMN generated_hash')
-            (Path(folder)/'.review-pages-v2').unlink()
+            (Path(folder)/'.review-pages-v3').unlink()
             first.review_path.unlink()
             second.review_path.unlink()
             with TraceCache(folder):

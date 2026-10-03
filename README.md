@@ -125,7 +125,11 @@ directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops may
 contain visible screen content and accessible names, so inspect the cache
 before sharing it. A matching HTML review page beside each SVG compares all
 matched bitmap crops at 16× nearest-neighbour scale with every algorithm's SVG.
-It also shows accessible names, match offsets, trace settings, and quality metrics.
+It also shows the foreground target, palette image, visible islands, ordered
+contour masks, and SVG beside the accessible names, offsets, and quality metrics.
+The images for older traces are restored when their regenerated SVG matches the
+original; traces whose original settings cannot be recovered show that the
+intermediate images are unavailable.
 
 For direct use in Python, `svgshot.tracing.trace(image, background,
 cache_dir=...)` accepts a cropped Pillow image and RGB colour (`"#ffffff"` or

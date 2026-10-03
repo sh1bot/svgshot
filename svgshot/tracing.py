@@ -297,10 +297,11 @@ class TraceCache:
         if 'fingerprint' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
             self.db.execute('ALTER TABLE bitmaps ADD COLUMN fingerprint BLOB')
         self.db.execute('DROP INDEX IF EXISTS bitmap_dimensions')
-        review_marker = self.root/'.review-pages-v2'
+        review_marker = self.root/'.review-pages-v3'
         if not review_marker.is_file():
             for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
                                           ('vector',)).fetchall():
+                self._restore_previews(group)
                 self._refresh_review_pages(group)
             _atomic_bytes(review_marker,b'1\n')
 
@@ -323,6 +324,48 @@ class TraceCache:
 
     def _svg_path(self, group, algorithm):
         return self.root/'groups'/group/'algorithms'/f'{algorithm}.svg'
+
+    def _preview_path(self, group, algorithm, stage):
+        return self._svg_path(group,algorithm).with_name(f'{algorithm}.{stage}.png')
+
+    def _write_previews(self, group, algorithm, previews):
+        for stage in ('target','quantized','islands'):
+            buffer = io.BytesIO()
+            previews[stage].save(buffer,format='PNG',optimize=True)
+            _atomic_bytes(self._preview_path(group,algorithm,stage),buffer.getvalue())
+        for index,layer in enumerate(previews['layers']):
+            buffer = io.BytesIO()
+            layer.save(buffer,format='PNG',optimize=True)
+            _atomic_bytes(self._preview_path(group,algorithm,f'layer-{index:02d}'),buffer.getvalue())
+
+    def _restore_previews(self, group):
+        """Replay old traces only when the resulting original SVG is verified."""
+        background, = self.db.execute('SELECT background FROM groups WHERE id=?',
+                                      (group,)).fetchone()
+        for algorithm,status,stored_hints,generated_hash in self.db.execute('''
+                SELECT algorithm,status,hints,generated_hash FROM traces
+                WHERE group_id=?''',(group,)).fetchall():
+            svg_path = self._svg_path(group,algorithm)
+            if status != 'vector' or not svg_path.is_file() or \
+                    self._preview_path(group,algorithm,'target').is_file():
+                continue
+            hints = json.loads(stored_hints)
+            selected_palette = hints.get('palette_size')
+            if selected_palette is not None and selected_palette < 2:
+                selected_palette = None  # Monochrome's implicit one-colour palette.
+            with Image.open(self._bitmap_path(group,group)) as source:
+                image = source.copy()
+            previews = {}
+            node = simplify_icon(image,(0,0,*image.size),smooth=algorithm.startswith('smooth-palette-'),
+                                 palette_size=selected_palette,
+                                 blur=hints.get('blur_radius',.5),background=_background(background),
+                                 previews=previews)
+            if node is None or node.kind != 'capture-artwork':
+                continue
+            generated = _make_svg(node).encode('utf-8')
+            original_hash = generated_hash or hashlib.sha256(svg_path.read_bytes()).hexdigest()
+            if hashlib.sha256(generated).hexdigest() == original_hash:
+                self._write_previews(group,algorithm,previews)
 
     def _refresh_review_pages(self, group):
         background, = self.db.execute('SELECT background FROM groups WHERE id=?',
@@ -369,13 +412,39 @@ class TraceCache:
                          if key not in dict(diagnostics))
             details = ''.join(f'<dt>{escape(label)}</dt><dd>{escape(str(value))}</dd>'
                               for label,value in pairs)
+            previews = []
+            for stage,label in (('target','Foreground target'),
+                                ('quantized','Quantized palette'),
+                                ('islands','Visible palette islands')):
+                path = self._preview_path(group,algorithm,stage)
+                if path.is_file():
+                    with Image.open(path) as preview:
+                        native = preview.size
+                    previews.append((path,label,native))
+            index = 0
+            while self._preview_path(group,algorithm,f'layer-{index:02d}').is_file():
+                path = self._preview_path(group,algorithm,f'layer-{index:02d}')
+                with Image.open(path) as preview:
+                    native = preview.size
+                previews.append((path,f'Layer {index+1} contour mask',native))
+                index += 1
+            preview_html = ''.join(
+                f'<figure><figcaption>{escape(label)} · {native[0]} × {native[1]} pixels'
+                f'</figcaption><a href="{escape(path.name,quote=True)}">'
+                f'<img class="stage-preview" src="{escape(path.name,quote=True)}" '
+                f'width="{w*16}" height="{h*16}" alt="{escape(label,quote=True)} from '
+                f'{escape(algorithm,quote=True)}"></a></figure>'
+                for path,label,native in previews)
             if status == 'vector' and svg_path.is_file():
                 current_svg = svg_path.read_bytes()
                 edited = bool(generated_hash and
                               hashlib.sha256(current_svg).hexdigest()!=generated_hash)
-                body = (f'<img class="vector-preview" src="{escape(svg_path.name,quote=True)}" '
+                body = '<div class="stages">' + (preview_html or
+                        '<p>Intermediate images unavailable for this older trace.</p>') + (
+                        f'<figure><figcaption>SVG trace</figcaption>'
+                        f'<img class="vector-preview" src="{escape(svg_path.name,quote=True)}" '
                         f'width="{w*16}" height="{h*16}" '
-                        f'alt="SVG trace from {escape(algorithm,quote=True)}">'
+                        f'alt="SVG trace from {escape(algorithm,quote=True)}"></figure></div>'
                         f'<p><a href="{escape(svg_path.name,quote=True)}">Open SVG</a> · '
                         f'{len(current_svg)} bytes</p>'
                         + ('<p class="edited">SVG edited since tracing; initial quality metrics '
@@ -405,6 +474,10 @@ class TraceCache:
                       'article.selected{border:3px solid #2669ac}img{max-width:none;'
                       'background:var(--icon-background);border:1px solid #777}'
                       '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
+                      '.stage-preview{image-rendering:pixelated}figure{margin:1rem 0}'
+                      'figcaption{font-weight:bold;margin-bottom:.3rem}'
+                      '.stages{display:grid;grid-template-columns:repeat(auto-fit,'
+                      'minmax(min(100%,290px),1fr));gap:1rem}.stages figure{overflow:auto}'
                       'dd{margin:0 0 .35rem 0}dl{margin:.6rem 0;display:grid;'
                       'grid-template-columns:max-content minmax(0,1fr);column-gap:.7rem}'
                       'code{overflow-wrap:anywhere}.edited{font-weight:bold;color:#a33}'
@@ -471,6 +544,7 @@ class TraceCache:
         if existing and existing[0]=='vector' and not self._svg_path(group,key).is_file():
             existing = None  # An SVG removed for retracing is regenerated.
         candidate_svg = None
+        previews = {}
         if not existing:
             # Another algorithm always traces the canonical first sighting.
             sample = self._bitmap(group) if match and group != digest else image
@@ -478,7 +552,8 @@ class TraceCache:
                 'SELECT background FROM groups WHERE id=?',(group,)).fetchone()[0])
             node = simplify_icon(sample,(0,0,sample.width,sample.height),
                                  allow_raster=True,smooth=algorithm=='smooth-palette',
-                                 palette_size=palette_size,blur=blur,background=bg)
+                                 palette_size=palette_size,blur=blur,background=bg,
+                                 previews=previews)
             candidate_svg = _make_svg(node) if node is not None and node.kind=='capture-artwork' else None
             if not match and candidate_svg:
                 for known_group, in self.db.execute('''SELECT t.group_id FROM traces t
@@ -513,6 +588,7 @@ class TraceCache:
                      ('paths','local','icon_size')} if candidate_svg else {}
             if candidate_svg:
                 _atomic_bytes(self._svg_path(group,key),candidate_svg.encode('utf-8'))
+                self._write_previews(group,key,previews)
             with self.db:
                 self.db.execute('''INSERT INTO traces
                     (group_id,algorithm,status,hints,generated_hash)
