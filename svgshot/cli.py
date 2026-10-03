@@ -53,6 +53,11 @@ def _parser():
                         help="Icon palette size for both tracers (2–32; default: automatic 4/8/12)")
     parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
                         help="Smooth icon Gaussian blur radius in source pixels (0–4; default: 0.5)")
+    cache = parser.add_mutually_exclusive_group()
+    cache.add_argument("--icon-cache-dir", type=Path, metavar="DIR",
+                       help="Store traced icon bitmaps and editable SVGs in DIR")
+    cache.add_argument("--no-icon-cache", action="store_true",
+                       help="Trace icons without storing source crops")
     add_options(parser)
     return parser
 
@@ -89,6 +94,10 @@ def _convert(data, snapshot, output, args):
         options.icon_palette_size = args.icon_palette_size
     if args.icon_blur is not None:
         options.icon_blur = args.icon_blur
+    if args.icon_cache_dir is not None:
+        options.icon_cache_dir = str(args.icon_cache_dir)
+    if args.no_icon_cache:
+        options.icon_cache_dir = ''
     if ((options.icon_palette_size is not None and not 2 <= options.icon_palette_size <= 32)
             or not 0 <= options.icon_blur <= 4):
         raise ValueError("icon palette size must be 2–32 and blur radius 0–4 source pixels")
@@ -106,7 +115,8 @@ def _convert(data, snapshot, output, args):
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
         simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback,
-            smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur)
+            smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur,
+            cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
         def serialize():
             return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None
                     else to_svg(scene, options.font_family))

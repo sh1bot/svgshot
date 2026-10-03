@@ -82,6 +82,24 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
     artwork_clip_serial = 0
     def artwork_paths(node):
         nonlocal artwork_clip_serial
+        if 'standalone_svg' in node.vector_data:
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(node.vector_data['standalone_svg'])
+            prefix = f'trace-{artwork_clip_serial}-'
+            artwork_clip_serial += 1
+            for element in root.iter():
+                if element.get('id'):
+                    element.set('id', prefix+element.get('id'))
+            for element in root.iter():
+                for name,value in list(element.attrib.items()):
+                    value = value.replace('url(#','url(#'+prefix)
+                    if name.endswith('}href') or name=='href':
+                        if value.startswith('#'):
+                            value='#'+prefix+value[1:]
+                    element.set(name,value)
+            dx,dy = node.vector_data.get('trace_offset',[0,0])
+            content = ET.tostring(root,encoding='unicode')
+            return f'<g transform="translate({dx:g} {dy:g})">{content}</g>' if dx or dy else content
         output = []
         for path in node.vector_data['paths']:
             stroke = f' stroke="{path["fill"]}" stroke-width="0.5"' if node.vector_data.get('opaque') else ''
@@ -101,6 +119,10 @@ def to_svg(root: Node, font_family: str = "auto") -> str:
         return f'<g opacity="{opacity}">{paths}</g>' if opacity != 1 else paths
 
     def artwork_key(node):
+        if 'standalone_svg' in node.vector_data:
+            return json.dumps([node.vector_data['standalone_svg'],
+                               node.vector_data.get('trace_offset',[0,0])],
+                              sort_keys=True,separators=(',',':'))
         return json.dumps([node.vector_data['icon_size'],node.vector_data['paths'],
                            node.vector_data.get('icon_opacity', 1),
                            node.vector_data.get('clip_to_first', False)],sort_keys=True,separators=(',',':'))

@@ -35,6 +35,7 @@ class Options:
     smooth_icons: bool = False
     icon_palette_size: int | None = None
     icon_blur: float = .5
+    icon_cache_dir: str | None = None
 
     @classmethod
     def from_file(cls, path: str | None) -> "Options":
@@ -1693,7 +1694,8 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
         bottom = max(n.box[1]+n.box[3] for n in all_nodes)
         root.children.append(Node("radio-group", (x,y,right-x,bottom-y), children=row))
     return simplify_scene_artwork(root, image, allow_raster=options.raster_fallback,
-        smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur)
+        smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur,
+        cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
 
 
 def _iou_boxes(a,b):
