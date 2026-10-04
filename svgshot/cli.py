@@ -47,10 +47,13 @@ def _parser():
                         help="Disable source PNG overlays (including config-enabled overlays)")
     parser.add_argument("--lang", help="Tesseract language (default: eng)")
     parser.add_argument("--font-family", help="SVG font family used for measured text fitting")
-    parser.add_argument("--smooth-icons", action="store_true",
-                        help="Experimental median-cut palette, blur, 4x bicubic and Bézier icon tracing")
+    icon_mode = parser.add_mutually_exclusive_group()
+    icon_mode.add_argument("--smooth-icons", action="store_true",
+                           help="Blur, upscale and fit curves to quantized icon contours")
+    icon_mode.add_argument("--pixel-boundary-icons", action="store_true",
+                           help="Trace quantized pixels exactly using horizontal and vertical lines")
     parser.add_argument("--icon-palette-size", type=int, metavar="N",
-                        help="Icon palette size for both tracers (2–32; default: automatic 4/8/12)")
+                        help="Icon palette size (2–32; default: automatic for fitted tracers, 4 for exact colour tracing)")
     parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
                         help="Smooth icon Gaussian blur radius in source pixels (0–4; default: 0.5)")
     cache = parser.add_mutually_exclusive_group()
@@ -90,6 +93,10 @@ def _convert(data, snapshot, output, args):
         options.font_family = args.font_family
     if args.smooth_icons:
         options.smooth_icons = True
+    if args.pixel_boundary_icons:
+        options.pixel_boundary_icons = True
+    if options.smooth_icons and options.pixel_boundary_icons:
+        raise ValueError("smooth_icons and pixel_boundary_icons cannot both be enabled")
     if args.icon_palette_size is not None:
         options.icon_palette_size = args.icon_palette_size
     if args.icon_blur is not None:
@@ -115,7 +122,8 @@ def _convert(data, snapshot, output, args):
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
         simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback,
-            smooth=options.smooth_icons, palette_size=options.icon_palette_size, blur=options.icon_blur,
+            smooth=options.smooth_icons, pixel_boundaries=options.pixel_boundary_icons,
+            palette_size=options.icon_palette_size, blur=options.icon_blur,
             cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
         def serialize():
             return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None

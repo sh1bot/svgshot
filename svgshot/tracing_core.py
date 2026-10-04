@@ -64,7 +64,28 @@ def _rdp(points, tolerance):
     return np.concatenate((_rdp(points[:index+1],tolerance)[:-1],_rdp(points[index:],tolerance)))
 
 
-def _simplify(points, tolerance):
+def _simplify(points, tolerance, *, preserve_extrema=False):
+    if preserve_extrema:
+        # RDP may discard a short tab that reaches the crop edge, replacing
+        # its right-angle corners with a diagonal. Pin the extreme corners and
+        # their neighbouring turns before simplifying the intervening spans.
+        previous = np.roll(points,1,axis=0)
+        following = np.roll(points,-1,axis=0)
+        turns = np.flatnonzero(np.any(points-previous != following-points,axis=1))
+        lower,upper = points.min(axis=0),points.max(axis=0)
+        outer = [index for index in turns if np.any(points[index]==lower)
+                 or np.any(points[index]==upper)]
+        if outer and len(turns)>=2:
+            positions = {int(index):position for position,index in enumerate(turns)}
+            pins = sorted({int(turns[(positions[int(index)]+offset)%len(turns)])
+                           for index in outer for offset in (-1,0,1)})
+            if len(pins)>=2:
+                pieces = []
+                for start,end in zip(pins,pins[1:]+pins[:1]):
+                    span = (points[start:end+1] if end>start else
+                            np.concatenate((points[start:],points[:end+1])))
+                    pieces.append(_rdp(span,tolerance)[:-1])
+                return np.concatenate(pieces)
     # Split a closed contour at distant vertices; a closed zero-length baseline
     # would otherwise collapse a loop or create an arbitrary corner.
     pivot = int(np.linalg.norm(points-points[0],axis=1).argmax())
@@ -275,10 +296,66 @@ def _boundary_previews(target, quantized, indices, palette, visible, masks):
     return {'target':target.copy(),
             'quantized':_palette_image(indices,palette,pixels[:,:,3]),
             'islands':_palette_image(indices,palette,visible.astype('uint8')*255),
+            'palette':[{'rgb':'#%02x%02x%02x'%tuple(int(c) for c in color),
+                        'pixels':int((visible & (indices == index)).sum())}
+                       for index,color in enumerate(palette)],
             'layers':[Image.fromarray(np.dstack((
                 np.broadcast_to(np.asarray(color[:3],dtype='uint8'),
                                 (*mask.shape,3)),mask.astype('uint8')*255)),'RGBA')
                       for color,mask in masks]}
+
+
+def _orthogonal_path(contour):
+    """Encode exact grid corners as one-coordinate H/V commands."""
+    points = [(int(x),int(y)) for x,y in contour]
+    corners = []
+    for index,point in enumerate(points):
+        previous,following = points[index-1],points[(index+1)%len(points)]
+        if (point[0]-previous[0],point[1]-previous[1]) != \
+                (following[0]-point[0],following[1]-point[1]):
+            corners.append(point)
+    if len(corners) < 4:
+        return ''
+    parts = [f'M{corners[0][0]},{corners[0][1]}']
+    for previous,following in zip(corners,corners[1:]+corners[:1]):
+        if following[0] != previous[0]:
+            assert following[1] == previous[1]
+            parts.append(f'H{following[0]}')
+        else:
+            assert following[1] != previous[1]
+            parts.append(f'V{following[1]}')
+    return ''.join(parts)+'Z'
+
+
+def _pixel_candidate(target, monochrome, box, palette_size, *, capture=False):
+    """Trace the one-pixel quantized masks without contour simplification."""
+    _,_,w,h = box
+    pixels = np.asarray(target)
+    visible = pixels[:,:,3] > max(8,float(pixels[:,:,3].max())*.35)
+    count = palette_size if palette_size is not None else (1 if monochrome else 4)
+    palette = _icon_palette(target,count)
+    indices = ((pixels[:,:,:3].astype(float)[:,:,None,:]-palette[None,None,:,:])**2).sum(axis=3).argmin(axis=2)
+    masks,opacity = _stacked_masks(pixels,indices,palette,visible)
+    clip_to_first = len(masks)>1 and all(color[3] == 255 for color,_ in masks)
+    paths = []
+    for color,mask in masks:
+        d = ' '.join(filter(None,(_orthogonal_path(contour) for contour in _contours(mask))))
+        if d:
+            paths.append({'d':d,'fill':'#%02x%02x%02x'%color[:3],
+                          **({'opacity':round(color[3]/255,3)} if color[3] != 255 else {})})
+    if not paths:
+        return None
+    quantized = _palette_image(indices,palette,pixels[:,:,3])
+    iou,error = _quality(target,quantized)
+    node = Node('capture-artwork',box,vector_data={
+        'paths':paths,'local':True,'icon_size':[w,h],
+        'approximation':'pixel-boundary','palette_size':len(palette),
+        'layering':'encirclement',
+        **({'clip_to_first':True} if clip_to_first else {}),
+        **({'icon_opacity':round(opacity,6)} if opacity != 1. else {}),
+        'silhouette_iou':round(iou,3),'colour_error':round(error,3)})
+    previews = _boundary_previews(target,quantized,indices,palette,visible,masks) if capture else None
+    return node,previews
 
 
 def _bezier(control, t):
@@ -482,7 +559,8 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
         clip_to_first = len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
         raw = [(color, _contours(mask)) for color, mask in masks]
         for tolerance in (1.,.65,.35):
-            layers = [(color,[_simplify(p,tolerance) for p in paths]) for color,paths in raw]
+            layers = [(color,[_simplify(p,tolerance,preserve_extrema=True) for p in paths])
+                      for color,paths in raw]
             layers = [(color,[p for p in paths if len(p)>=3]) for color,paths in layers]
             rendered = _render(layers,(w,h),opacity,clip_to_first)
             iou,error = _quality(target,rendered)
@@ -513,7 +591,7 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
 
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None, blur=.5,
-                  background=None, previews=None):
+                  background=None, previews=None, pixel_boundaries=False):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
     if ((palette_size is not None and (not isinstance(palette_size, int) or not 2 <= palette_size <= 32))
@@ -522,6 +600,14 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
     target,monochrome = _target(image,box,background=background)
     if target is None:
         return None
+    if pixel_boundaries:
+        exact = _pixel_candidate(target,monochrome,box,palette_size,
+                                 capture=previews is not None)
+        if exact is not None:
+            node,stages = exact
+            if previews is not None:
+                previews.update(stages)
+            return node
     def candidate(target, monochrome):
         if not smooth:
             return _vector_candidate(target, monochrome, box, palette_size,

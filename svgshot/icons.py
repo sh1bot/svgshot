@@ -9,15 +9,17 @@ from .tracing_core import (_background_color, _bezier, _fit_curve, _icon_palette
 
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None,
-                  blur=.5, cache_dir=False, name=None):
+                  blur=.5, cache_dir=False, name=None, pixel_boundaries=False):
     """Trace a crop, with optional disk cache; direct calls default to no cache."""
     if cache_dir is False:
         return _uncached_simplify_icon(image,box,allow_raster=allow_raster,
-                                       smooth=smooth,palette_size=palette_size,blur=blur)
+                                       smooth=smooth,palette_size=palette_size,blur=blur,
+                                       pixel_boundaries=pixel_boundaries)
     x,y,w,h=box
     background=_background_color(image,box)
     result=trace(image.crop((x,y,x+w,y+h)),background,
-                 cache_dir=cache_dir,algorithm='smooth-palette' if smooth else 'palette',
+                 cache_dir=cache_dir,algorithm=('pixel-boundary' if pixel_boundaries else
+                                                'smooth-palette' if smooth else 'palette'),
                  palette_size=palette_size,blur=blur,allow_raster=allow_raster,name=name)
     if result.node is not None:
         result.node.box=box
@@ -25,7 +27,8 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
 
 
 def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
-                           palette_size=None, blur=.5, cache_dir=None):
+                           palette_size=None, blur=.5, cache_dir=None,
+                           pixel_boundaries=False):
     """Both recognition routes converge here, after control/text heuristics."""
     cache = {}
     def visit(parent):
@@ -47,6 +50,7 @@ def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
                 cache[key] = simplify_icon(image,node.box,allow_raster=allow_raster,
                                            smooth=smooth,palette_size=palette_size,
                                            blur=blur,cache_dir=cache_dir,
+                                           pixel_boundaries=pixel_boundaries,
                                            name=node.vector_data.get('accessible_name'))
             template = cache[key]
             replacement = (Node(template.kind, node.box, image_data=template.image_data,

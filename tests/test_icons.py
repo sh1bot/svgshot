@@ -10,6 +10,7 @@ from svgshot.icons import (simplify_icon, simplify_scene_artwork, _icon_palette,
                            _smooth_quantize, _fit_curve, _sample_segment,
                            _bezier, _background_color, _target, _stacked_masks)
 from svgshot.model import Node
+from svgshot.tracing_core import _contours, _simplify
 from svgshot.svg import to_svg
 from svgshot.validate import render
 
@@ -22,6 +23,23 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_original_tracer_preserves_square_tab_touching_crop_edge(self):
+        image=Image.new('RGBA',(12,10))
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((2,2,8,8),fill=(20,80,220,255))
+        draw.point((5,9),fill=(20,80,220,255))
+        mask=np.asarray(image.getchannel('A'))>0
+        contour=_contours(mask)[0]
+        pinned=_simplify(contour,1.,preserve_extrema=True)
+        self.assertEqual(pinned.max(axis=0)[1],10)
+        icon=simplify_icon(image,(0,0,12,10))
+        self.assertEqual(icon.kind,'capture-artwork')
+        d=icon.vector_data['paths'][0]['d']
+        self.assertIn('6,9 6,10 5,10 5,9',d)
+        output=render_svg(to_svg(Node('window',(0,0,12,10),color='#ffffff',children=[icon])),12)
+        np.testing.assert_array_equal(output[9,5,:3],[20,80,220])
+        np.testing.assert_array_equal(output[9,4,:3],[255,255,255])
+
     def test_encircling_colours_underpaint_without_filling_transparent_holes(self):
         colors = np.array([[220, 60, 20], [20, 80, 220], [220, 180, 20]])
         indices = np.full((24, 24), 2)

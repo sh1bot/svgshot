@@ -28,7 +28,7 @@ from .tracing_core import simplify_icon
 
 SVG_NS = 'http://www.w3.org/2000/svg'
 ET.register_namespace('', SVG_NS)
-VERSION = 1
+VERSION = 2
 
 
 def default_cache_dir() -> Path:
@@ -100,10 +100,10 @@ def _atomic_bytes(path, contents):
             os.unlink(temporary)
 
 
-def _filename(algorithm, palette_size, blur):
+def _filename(algorithm, palette_size, blur, *, version=VERSION):
     if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,50}', algorithm):
         raise ValueError('algorithm names must use letters, digits, hyphens or underscores')
-    settings = json.dumps([VERSION, algorithm, palette_size,
+    settings = json.dumps([version, algorithm, palette_size,
                            blur if algorithm == 'smooth-palette' else None], separators=(',', ':'))
     return f'{algorithm}-{hashlib.sha256(settings.encode()).hexdigest()[:16]}'
 
@@ -297,7 +297,7 @@ class TraceCache:
         if 'fingerprint' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
             self.db.execute('ALTER TABLE bitmaps ADD COLUMN fingerprint BLOB')
         self.db.execute('DROP INDEX IF EXISTS bitmap_dimensions')
-        review_marker = self.root/'.review-pages-v4'
+        review_marker = self.root/'.review-pages-v5'
         if not review_marker.is_file():
             for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
                                           ('vector',)).fetchall():
@@ -329,6 +329,8 @@ class TraceCache:
         return self._svg_path(group,algorithm).with_name(f'{algorithm}.{stage}.png')
 
     def _write_previews(self, group, algorithm, previews):
+        _atomic_bytes(self._preview_path(group,algorithm,'palette').with_suffix('.json'),
+                      (json.dumps(previews['palette'],separators=(',',':'))+'\n').encode('utf-8'))
         for stage in ('target','quantized','islands'):
             buffer = io.BytesIO()
             previews[stage].save(buffer,format='PNG',optimize=True)
@@ -347,7 +349,8 @@ class TraceCache:
                 WHERE group_id=?''',(group,)).fetchall():
             svg_path = self._svg_path(group,algorithm)
             if status != 'vector' or not svg_path.is_file() or \
-                    self._preview_path(group,algorithm,'target').is_file():
+                    (self._preview_path(group,algorithm,'target').is_file() and
+                     self._preview_path(group,algorithm,'palette').with_suffix('.json').is_file()):
                 continue
             hints = json.loads(stored_hints)
             selected_palette = hints.get('palette_size')
@@ -357,6 +360,7 @@ class TraceCache:
                 image = source.copy()
             previews = {}
             node = simplify_icon(image,(0,0,*image.size),smooth=algorithm.startswith('smooth-palette-'),
+                                 pixel_boundaries=algorithm.startswith('pixel-boundary-'),
                                  palette_size=selected_palette,
                                  blur=hints.get('blur_radius',.5),background=_background(background),
                                  previews=previews)
@@ -412,6 +416,14 @@ class TraceCache:
                          if key not in dict(diagnostics))
             details = ''.join(f'<dt>{escape(label)}</dt><dd>{escape(str(value))}</dd>'
                               for label,value in pairs)
+            palette_file = self._preview_path(group,algorithm,'palette').with_suffix('.json')
+            palette_html = ''
+            if palette_file.is_file():
+                swatches = json.loads(palette_file.read_text(encoding='utf-8'))
+                palette_html = '<h4>Selected palette</h4><ul class="palette">' + ''.join(
+                    f'<li><span class="swatch" style="background-color:{entry["rgb"]}"></span>'
+                    f'<code>{entry["rgb"]}</code> · {entry["pixels"]} grid pixels</li>'
+                    for entry in swatches if re.fullmatch(r'#[0-9a-fA-F]{6}',entry['rgb'])) + '</ul>'
             previews = []
             for stage,label in (('target','Foreground target'),
                                 ('quantized','Quantized palette'),
@@ -439,7 +451,7 @@ class TraceCache:
                 current_svg = svg_path.read_bytes()
                 edited = bool(generated_hash and
                               hashlib.sha256(current_svg).hexdigest()!=generated_hash)
-                body = '<div class="stages">' + (preview_html or
+                body = palette_html + '<div class="stages">' + (preview_html or
                         '<p>Intermediate images unavailable for this older trace.</p>') + (
                         f'<figure><figcaption>SVG trace</figcaption>'
                         f'<img class="vector-preview" src="{escape(svg_path.name,quote=True)}" '
@@ -480,6 +492,10 @@ class TraceCache:
                       '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
                       '.stage-preview{image-rendering:pixelated}figure{margin:1rem 0}'
                       'figcaption{font-weight:bold;margin-bottom:.3rem}'
+                      '.palette{display:flex;flex-wrap:wrap;gap:.75rem;list-style:none;padding:0}'
+                      '.palette li{display:flex;align-items:center;gap:.35rem}'
+                      '.swatch{display:inline-block;width:2.5rem;height:2.5rem;'
+                      'border:1px solid #555;flex:none}'
                       '.stages{display:grid;grid-template-columns:repeat(auto-fit,'
                       'minmax(min(100%,290px),1fr));gap:1rem}.stages figure{overflow:auto}'
                       'dd{margin:0 0 .35rem 0}dl{margin:.6rem 0;display:grid;'
@@ -509,7 +525,7 @@ class TraceCache:
             raise ValueError('The image to trace must be nonempty')
         background = _background(background)
         rgb = '#%02x%02x%02x'%background
-        if algorithm not in ('palette','smooth-palette'):
+        if algorithm not in ('palette','smooth-palette','pixel-boundary'):
             raise ValueError('Unknown tracing algorithm: '+algorithm)
         key = _filename(algorithm,palette_size,blur)
         digest = _hash(image,background)
@@ -548,8 +564,27 @@ class TraceCache:
                 match = 'bitmap'
         existing = self.db.execute('SELECT status,hints FROM traces WHERE group_id=? AND algorithm=?',
                                    (group,key)).fetchone() if match else None
+        registered = existing is not None
         if existing and existing[0]=='vector' and not self._svg_path(group,key).is_file():
             existing = None  # An SVG removed for retracing is regenerated.
+        if not registered and match and algorithm == 'palette':
+            # A new tracer version must not silently discard hand edits made
+            # to the previous version's standalone SVG.
+            previous = _filename(algorithm,palette_size,blur,version=1)
+            old = self.db.execute('''SELECT status,hints,generated_hash FROM traces
+                WHERE group_id=? AND algorithm=?''',(group,previous)).fetchone()
+            old_path = self._svg_path(group,previous)
+            if old and old[0]=='vector' and old_path.is_file():
+                contents = old_path.read_bytes()
+                if old[2] is None or hashlib.sha256(contents).hexdigest()!=old[2]:
+                    _atomic_bytes(self._svg_path(group,key),contents)
+                    inherited_hints = {**json.loads(old[1]),'migrated_edit_from':previous}
+                    with self.db:
+                        self.db.execute('''INSERT INTO traces
+                            (group_id,algorithm,status,hints,generated_hash)
+                            VALUES (?,?,?,?,?)''',
+                            (group,key,'vector',json.dumps(inherited_hints),old[2]))
+                    existing = ('vector',json.dumps(inherited_hints))
         candidate_svg = None
         previews = {}
         if not existing:
@@ -559,6 +594,7 @@ class TraceCache:
                 'SELECT background FROM groups WHERE id=?',(group,)).fetchone()[0])
             node = simplify_icon(sample,(0,0,sample.width,sample.height),
                                  allow_raster=True,smooth=algorithm=='smooth-palette',
+                                 pixel_boundaries=algorithm=='pixel-boundary',
                                  palette_size=palette_size,blur=blur,background=bg,
                                  previews=previews)
             candidate_svg = _make_svg(node) if node is not None and node.kind=='capture-artwork' else None
@@ -646,7 +682,8 @@ def main(argv=None):
     parser.add_argument('image',type=Path,help='Cropped source PNG')
     parser.add_argument('background',help='Background colour, e.g. #ffffff')
     parser.add_argument('--cache-dir',type=Path)
-    parser.add_argument('--algorithm',choices=('palette','smooth-palette'),default='palette')
+    parser.add_argument('--algorithm',choices=('palette','smooth-palette','pixel-boundary'),
+                        default='palette')
     parser.add_argument('--palette-size',type=int)
     parser.add_argument('--blur',type=float,default=.5)
     parser.add_argument('--name',help='Optional human label for this source image')

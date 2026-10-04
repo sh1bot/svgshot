@@ -115,6 +115,8 @@ For experimental icon smoothing, use `--smooth-icons`. It blurs by 0.5 source
 pixels, enlarges 4× with bicubic interpolation, quantises without dithering,
 then fits straight segments and Bézier curves. Tune blur with `--icon-blur RADIUS`.
 Icons that lose too much detail retain the usual bitmap fallback.
+Use `--pixel-boundary-icons` to trace the unsmoothed quantized pixel grid exactly.
+Its paths contain only horizontal and vertical segments and may be much larger.
 
 Traced icons are saved in a local cache so repeated captures can reuse their
 artwork. The cache holds each observed icon crop as a PNG and editable,
@@ -125,7 +127,8 @@ directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops may
 contain visible screen content and accessible names, so inspect the cache
 before sharing it. A matching HTML review page beside each SVG compares all
 matched bitmap crops at 16× nearest-neighbour scale with every algorithm's SVG.
-It also shows the foreground target, palette image, visible islands, ordered
+It also shows selected palette swatches with grid pixel counts, the foreground
+target, quantized image, visible islands, ordered
 contour masks, and SVG beside the accessible names, offsets, and quality metrics.
 The page uses a diagonal checker to reveal transparency, with a switch to show
 the captured background.
@@ -138,8 +141,9 @@ cache_dir=...)` accepts a cropped Pillow image and RGB colour (`"#ffffff"` or
 an RGB triple). The result contains `.svg` (the standalone file contents),
 `.svg_path`, `.review_path`, `.node` (artwork ready for a scene), `.group_id`,
 `.source_hash`, `.offset`, and `.match`. The optional `name` argument records an
-accessible label for the source bitmap. `algorithm="smooth-palette"` selects the alternate
-tracer. To trace one crop from a shell, run
+accessible label for the source bitmap. `algorithm="smooth-palette"` selects the
+smoothed tracer; `algorithm="pixel-boundary"` selects exact grid tracing.
+To trace one crop from a shell, run
 `svgshot-trace icon.png '#ffffff' --cache-dir ./icon-cache`; it prints the SVG
 file to edit. Each canonical group has its observed PNGs in `bitmaps/` and
 separate SVGs in `algorithms/`.
