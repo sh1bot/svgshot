@@ -257,6 +257,42 @@ def _icon_palette(target, count):
     return np.unique(np.asarray(quantized.convert('RGB')).reshape(-1, 3), axis=0)
 
 
+def _opaque_target(image, box, background):
+    """Composite real source alpha onto the chosen colour; infer none."""
+    patch = image.crop((box[0],box[1],box[0]+box[2],box[1]+box[3])).convert('RGBA')
+    canvas = Image.new('RGBA',patch.size,tuple(int(c) for c in background)+(255,))
+    canvas.alpha_composite(patch)
+    return canvas
+
+
+def _trace_palette(target, count, background=None):
+    if background is None:
+        return _icon_palette(target,count)
+    bg = np.asarray(background,dtype='uint8')
+    pixels = np.asarray(target.convert('RGB')).reshape(-1,3)
+    # The background is an exact palette entry. Median-cut considers only
+    # pixels visibly different from it for the remaining entries.
+    foreground = pixels[np.linalg.norm(pixels.astype(float)-bg,axis=1)>8]
+    if not len(foreground) or count == 1:
+        return bg.reshape(1,3)
+    sample = Image.fromarray(foreground.reshape(1,-1,3))
+    quantized = sample.quantize(colors=count-1,method=Image.Quantize.MEDIANCUT,
+                               dither=Image.Dither.NONE)
+    other = np.unique(np.asarray(quantized.convert('RGB')).reshape(-1,3),axis=0)
+    other = other[np.any(other!=bg,axis=1)]
+    return np.vstack((bg,other))
+
+
+def _trace_masks(pixels, indices, palette, visible, *, background=None, alpha_source=None):
+    if background is None:
+        return _stacked_masks(pixels,indices,palette,visible,alpha_source=alpha_source)
+    # The first mask represents the already painted background for diagnostics
+    # and quality checks. It is intentionally omitted from exported geometry.
+    active = visible & (indices != 0)
+    later,_ = _stacked_masks(pixels,indices,palette,active) if active.any() else ([],1.)
+    return [(tuple(int(c) for c in palette[0])+(255,),np.ones_like(visible))]+later,1.
+
+
 def _palette_counts(monochrome, palette_size):
     return (palette_size,) if palette_size is not None else ((1,) if monochrome else (4, 8, 12))
 
@@ -327,23 +363,26 @@ def _orthogonal_path(contour):
     return ''.join(parts)+'Z'
 
 
-def _pixel_candidate(target, monochrome, box, palette_size, *, capture=False):
+def _pixel_candidate(target, monochrome, box, palette_size, *, capture=False,
+                     background=None):
     """Trace the one-pixel quantized masks without contour simplification."""
     _,_,w,h = box
     pixels = np.asarray(target)
     visible = pixels[:,:,3] > max(8,float(pixels[:,:,3].max())*.35)
     count = palette_size if palette_size is not None else (1 if monochrome else 4)
-    palette = _icon_palette(target,count)
+    palette = _trace_palette(target,count,background)
     indices = ((pixels[:,:,:3].astype(float)[:,:,None,:]-palette[None,None,:,:])**2).sum(axis=3).argmin(axis=2)
-    masks,opacity = _stacked_masks(pixels,indices,palette,visible)
-    clip_to_first = len(masks)>1 and all(color[3] == 255 for color,_ in masks)
+    masks,opacity = _trace_masks(pixels,indices,palette,visible,background=background)
+    clip_to_first = background is None and len(masks)>1 and all(color[3] == 255 for color,_ in masks)
     paths = []
-    for color,mask in masks:
+    for layer_index,(color,mask) in enumerate(masks):
+        if background is not None and layer_index == 0:
+            continue
         d = ' '.join(filter(None,(_orthogonal_path(contour) for contour in _contours(mask))))
         if d:
             paths.append({'d':d,'fill':'#%02x%02x%02x'%color[:3],
                           **({'opacity':round(color[3]/255,3)} if color[3] != 255 else {})})
-    if not paths:
+    if not paths and background is None:
         return None
     quantized = _palette_image(indices,palette,pixels[:,:,3])
     iou,error = _quality(target,quantized)
@@ -351,6 +390,7 @@ def _pixel_candidate(target, monochrome, box, palette_size, *, capture=False):
         'paths':paths,'local':True,'icon_size':[w,h],
         'approximation':'pixel-boundary','palette_size':len(palette),
         'layering':'encirclement',
+        **({'no_estimated_alpha':True} if background is not None else {}),
         **({'clip_to_first':True} if clip_to_first else {}),
         **({'icon_opacity':round(opacity,6)} if opacity != 1. else {}),
         'silhouette_iou':round(iou,3),'colour_error':round(error,3)})
@@ -475,9 +515,10 @@ def _curve_contour(points, tolerance, *, prefer_lines=True):
     return curves
 
 
-def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
+def _smooth_candidate(target, box, palette_size, blur, *, capture=False,
+                      background=None):
     x, y, w, h = box
-    palette = _icon_palette(target, palette_size)
+    palette = _trace_palette(target, palette_size, background)
     if not len(palette):
         return None
     # Isolate foreground once, before filtering. Background colours must not
@@ -486,8 +527,9 @@ def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
     pixels = np.asarray(prepared)
     visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
     indices = ((pixels[:, :, :3].astype(float)[:, :, None]-palette[None, None])**2).sum(axis=3).argmin(axis=2)
-    masks, opacity = _stacked_masks(pixels, indices, palette, visible, alpha_source=target)
-    clip_to_first = len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
+    masks, opacity = _trace_masks(pixels, indices, palette, visible,
+                                 background=background,alpha_source=target)
+    clip_to_first = background is None and len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
     raw = []
     for color, mask in masks:
         if mask.any():
@@ -522,7 +564,9 @@ def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
         paths = []
         def number(value):
             return f'{value:.3f}'.rstrip('0').rstrip('.') or '0'
-        for color, contours in fitted:
+        for layer_index,(color, contours) in enumerate(fitted):
+            if background is not None and layer_index == 0:
+                continue
             parts = []
             for curves in contours:
                 parts.append('M' + ','.join(number(v) for v in curves[0][0]))
@@ -538,6 +582,7 @@ def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
             best = (size, Node('capture-artwork', box, vector_data={'paths':paths, 'local':True,
                 'icon_size':[w, h], 'approximation':'smooth-palette', 'palette_size':len(palette),
                 'blur_radius':blur, 'layering':'encirclement',
+                **({'no_estimated_alpha':True} if background is not None else {}),
                 **({'clip_to_first':True} if clip_to_first else {}),
                 **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                 'silhouette_iou':round(iou, 3), 'colour_error':round(error, 3)}))
@@ -546,17 +591,18 @@ def _smooth_candidate(target, box, palette_size, blur, *, capture=False):
     return best
 
 
-def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=False):
+def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=False,
+                      background=None):
     x,y,w,h = box
     pixels = np.asarray(target)
     visible = pixels[:,:,3] > max(8,float(pixels[:,:,3].max())*.35)
     best = None
     for count in _palette_counts(monochrome, palette_size):
-        colors = _icon_palette(target, count)
+        colors = _trace_palette(target, count, background)
         distances = ((pixels[:,:,:3].astype(float)[:,:,None,:]-colors[None,None,:,:])**2).sum(axis=3)
         indices = distances.argmin(axis=2)
-        masks, opacity = _stacked_masks(pixels, indices, colors, visible)
-        clip_to_first = len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
+        masks, opacity = _trace_masks(pixels, indices, colors, visible,background=background)
+        clip_to_first = background is None and len(masks) > 1 and all(color[3] == 255 for color, _ in masks)
         raw = [(color, _contours(mask)) for color, mask in masks]
         for tolerance in (1.,.65,.35):
             layers = [(color,[_simplify(p,tolerance,preserve_extrema=True) for p in paths])
@@ -568,8 +614,11 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
             if iou < .82 or error > .16 or vertices > 500:
                 continue
             paths = []
-            for color,contours in layers:
-                d = ' '.join('M'+' '.join(f'{a:g},{b:g}' for a,b in contour)+'Z' for contour in contours)
+            for layer_index,(color,contours) in enumerate(layers):
+                if background is not None and layer_index == 0:
+                    continue
+                d = ' '.join('M'+' '.join(f'{a:g},{b:g}' for a,b in contour)+'Z'
+                             for contour in contours)
                 if d:
                     paths.append({'d':d,'fill':'#%02x%02x%02x'%color[:3],
                                   **({'opacity':round(color[3]/255,3)} if color[3] != 255 else {})})
@@ -578,6 +627,7 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
                 best = (size,Node('capture-artwork',box,vector_data={'paths':paths,'local':True,
                     'icon_size':[w,h],'approximation':'monochrome' if monochrome else 'colour',
                     'layering':'encirclement','palette_size':len(colors),
+                    **({'no_estimated_alpha':True} if background is not None else {}),
                     **({'clip_to_first':True} if clip_to_first else {}),
                     **({'icon_opacity':round(opacity, 6)} if opacity != 1. else {}),
                     'silhouette_iou':round(iou,3),'colour_error':round(error,3)}))
@@ -591,18 +641,26 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
 
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None, blur=.5,
-                  background=None, previews=None, pixel_boundaries=False):
+                  background=None, previews=None, pixel_boundaries=False,
+                  no_estimated_alpha=False):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
     if ((palette_size is not None and (not isinstance(palette_size, int) or not 2 <= palette_size <= 32))
             or not np.isfinite(blur) or not 0 <= blur <= 4):
         raise ValueError('icon palette size must be 2–32 and blur radius 0–4 source pixels')
-    target,monochrome = _target(image,box,background=background)
+    if no_estimated_alpha:
+        if background is None:
+            background = _background_color(image,box)
+        background = tuple(int(c) for c in background)
+        target,monochrome = _opaque_target(image,box,background),False
+    else:
+        target,monochrome = _target(image,box,background=background)
     if target is None:
         return None
     if pixel_boundaries:
         exact = _pixel_candidate(target,monochrome,box,palette_size,
-                                 capture=previews is not None)
+                                 capture=previews is not None,
+                                 background=background if no_estimated_alpha else None)
         if exact is not None:
             node,stages = exact
             if previews is not None:
@@ -611,14 +669,16 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
     def candidate(target, monochrome):
         if not smooth:
             return _vector_candidate(target, monochrome, box, palette_size,
-                                     capture=previews is not None)
+                                     capture=previews is not None,
+                                     background=background if no_estimated_alpha else None)
         choices = [_smooth_candidate(target, box, count, blur,
-                                     capture=previews is not None)
+                                     capture=previews is not None,
+                                     background=background if no_estimated_alpha else None)
                    for count in _palette_counts(monochrome, palette_size)]
         return min((choice for choice in choices if choice is not None),
                    key=lambda choice: choice[0], default=None)
     best = candidate(target, monochrome)
-    if best is None and monochrome:
+    if best is None and monochrome and not no_estimated_alpha:
         target, _ = _target(image, box, force_colour=True, background=background)
         best = candidate(target, False)
     if best:

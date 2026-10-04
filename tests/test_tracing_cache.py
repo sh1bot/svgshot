@@ -14,7 +14,7 @@ import numpy as np
 
 from svgshot.model import Node
 from svgshot.svg import to_svg
-from svgshot.tracing import (trace, TraceCache, _bitmap_match, _fingerprint,
+from svgshot.tracing import (trace, TraceCache, main as trace_main, _bitmap_match, _fingerprint,
                              _fingerprint_might_match, _filename)
 from svgshot.tracing_core import _target, _icon_palette, _smooth_quantize
 from svgshot.validate import render
@@ -154,6 +154,63 @@ class TraceCacheTests(TestCase):
             again=trace(image,'#ffffff',cache_dir=folder,algorithm='pixel-boundary')
             self.assertEqual(again.match,'exact')
             self.assertEqual(again.svg,result.svg)
+
+    def test_no_estimated_alpha_uses_background_as_reference_without_exporting_it(self):
+        with TemporaryDirectory() as folder:
+            image=icon()
+            inferred=trace(image,'#ffffff',cache_dir=folder,palette_size=2)
+            for algorithm in ('palette','smooth-palette','pixel-boundary'):
+                with self.subTest(algorithm=algorithm):
+                    result=trace(image,'#ffffff',cache_dir=folder,
+                                 algorithm=algorithm,palette_size=2,
+                                 no_estimated_alpha=True)
+                    self.assertIsNotNone(result.svg_path)
+                    self.assertNotEqual(result.svg_path,inferred.svg_path)
+                    self.assertIn(inferred.svg_path.name,result.review_path.read_text())
+                    paths=ET.parse(result.svg_path).findall('.//{http://www.w3.org/2000/svg}path')
+                    self.assertEqual(len(paths),1)
+                    self.assertEqual(paths[0].get('fill'),'#1450dc')
+                    self.assertNotIn('fill="#ffffff"',result.svg)
+                    self.assertTrue(result.node.vector_data['no_estimated_alpha'])
+                    self.assertIn('Background reference (not exported)',
+                                  result.review_path.read_text())
+                    palette=json.loads(result.svg_path.with_name(
+                        result.svg_path.stem+'.palette.json').read_text())
+                    self.assertEqual(palette[0]['rgb'],'#ffffff')
+                    with Image.open(result.svg_path.with_name(
+                            result.svg_path.stem+'.quantized.png')) as quantized:
+                        self.assertEqual(quantized.getchannel('A').getextrema(),(255,255))
+                    with Image.open(result.svg_path.with_name(
+                            result.svg_path.stem+'.layer-00.png')) as layer:
+                        self.assertEqual(layer.getchannel('A').getextrema(),(255,255))
+                    rendered=np.asarray(render(str(result.svg_path),24))
+                    self.assertTrue(np.all(rendered[0,0]==255))
+                    self.assertTrue(np.all(rendered[10,10]==(20,80,220)))
+
+    def test_no_estimated_alpha_flattens_real_alpha_without_inferring_new_alpha(self):
+        with TemporaryDirectory() as folder:
+            image=Image.new('RGBA',(24,24))
+            ImageDraw.Draw(image).rectangle((5,5,18,18),fill=(20,80,220,128))
+            result=trace(image,'#101820',cache_dir=folder,
+                         algorithm='pixel-boundary',palette_size=2,no_estimated_alpha=True)
+            target=result.svg_path.with_name(result.svg_path.stem+'.target.png')
+            with Image.open(target) as flattened:
+                self.assertEqual(flattened.getchannel('A').getextrema(),(255,255))
+                self.assertEqual(flattened.getpixel((0,0))[:3],(16,24,32))
+                self.assertNotEqual(flattened.getpixel((8,8))[:3],(20,80,220))
+            self.assertNotIn('fill="#101820"',result.svg)
+            self.assertNotIn('M0,0H24V24H0Z',result.svg)
+
+    def test_trace_cli_accepts_no_estimated_alpha_switch(self):
+        with TemporaryDirectory() as folder:
+            source=Path(folder)/'icon.png'
+            icon().save(source)
+            self.assertEqual(trace_main([str(source),'#ffffff','--algorithm','pixel-boundary',
+                                         '--no-estimated-alpha','--palette-size','2',
+                                         '--cache-dir',folder]),0)
+            paths=list((Path(folder)/'groups').glob('*/algorithms/pixel-boundary-*.svg'))
+            self.assertEqual(len(paths),1)
+            self.assertNotIn('d="M0,0H24V24H0Z"',paths[0].read_text())
 
     def test_old_svg_backfill_keeps_an_edited_trace(self):
         with TemporaryDirectory() as folder:

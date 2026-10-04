@@ -18,11 +18,11 @@ class ConversionTests(unittest.TestCase):
             Image.new('RGB',(24,24),'white').save(source)
             seen=[]
             with patch('svgshot.cli.reconstruct',side_effect=lambda image,options,**kwargs:
-                       (seen.append(options.pixel_boundary_icons) or
+                       (seen.append((options.pixel_boundary_icons,options.no_estimated_alpha)) or
                         Node('window',(0,0,24,24),color='#ffffff'))):
                 self.assertEqual(main([str(source),str(source.with_suffix('.svg')),
-                                       '--pixel-boundary-icons']),0)
-            self.assertEqual(seen,[True])
+                                       '--pixel-boundary-icons','--no-estimated-alpha']),0)
+            self.assertEqual(seen,[(True,True)])
 
     def test_shared_options_reports_and_missing_metadata_warning(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -100,11 +100,15 @@ def _atomic_bytes(path, contents):
             os.unlink(temporary)
 
 
-def _filename(algorithm, palette_size, blur, *, version=VERSION):
+def _filename(algorithm, palette_size, blur, *, version=VERSION,
+              no_estimated_alpha=False):
     if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,50}', algorithm):
         raise ValueError('algorithm names must use letters, digits, hyphens or underscores')
-    settings = json.dumps([version, algorithm, palette_size,
-                           blur if algorithm == 'smooth-palette' else None], separators=(',', ':'))
+    settings = [version,algorithm,palette_size,
+                blur if algorithm == 'smooth-palette' else None]
+    if no_estimated_alpha:
+        settings.append('no-estimated-alpha')
+    settings = json.dumps(settings,separators=(',', ':'))
     return f'{algorithm}-{hashlib.sha256(settings.encode()).hexdigest()[:16]}'
 
 
@@ -361,6 +365,7 @@ class TraceCache:
             previews = {}
             node = simplify_icon(image,(0,0,*image.size),smooth=algorithm.startswith('smooth-palette-'),
                                  pixel_boundaries=algorithm.startswith('pixel-boundary-'),
+                                 no_estimated_alpha=hints.get('no_estimated_alpha',False),
                                  palette_size=selected_palette,
                                  blur=hints.get('blur_radius',.5),background=_background(background),
                                  previews=previews)
@@ -438,7 +443,10 @@ class TraceCache:
                 path = self._preview_path(group,algorithm,f'layer-{index:02d}')
                 with Image.open(path) as preview:
                     native = preview.size
-                previews.append((path,f'Layer {index+1} contour mask',native))
+                label = ('Background reference (not exported)' if
+                         index == 0 and hints.get('no_estimated_alpha') else
+                         f'Layer {index+1} contour mask')
+                previews.append((path,label,native))
                 index += 1
             preview_html = ''.join(
                 f'<figure><figcaption>{escape(label)} · {native[0]} × {native[1]} pixels'
@@ -519,7 +527,7 @@ class TraceCache:
                 _atomic_bytes(page,data)
 
     def trace(self, image, background, *, algorithm='palette', palette_size=None, blur=.5,
-              allow_raster=True, name=None):
+              allow_raster=True, name=None, no_estimated_alpha=False):
         image = image.copy()
         if not image.width or not image.height:
             raise ValueError('The image to trace must be nonempty')
@@ -527,7 +535,7 @@ class TraceCache:
         rgb = '#%02x%02x%02x'%background
         if algorithm not in ('palette','smooth-palette','pixel-boundary'):
             raise ValueError('Unknown tracing algorithm: '+algorithm)
-        key = _filename(algorithm,palette_size,blur)
+        key = _filename(algorithm,palette_size,blur,no_estimated_alpha=no_estimated_alpha)
         digest = _hash(image,background)
         row = self.db.execute('SELECT group_id,dx,dy FROM bitmaps WHERE hash=?',(digest,)).fetchone()
         match = 'exact' if row else None
@@ -567,7 +575,7 @@ class TraceCache:
         registered = existing is not None
         if existing and existing[0]=='vector' and not self._svg_path(group,key).is_file():
             existing = None  # An SVG removed for retracing is regenerated.
-        if not registered and match and algorithm == 'palette':
+        if not registered and match and algorithm == 'palette' and not no_estimated_alpha:
             # A new tracer version must not silently discard hand edits made
             # to the previous version's standalone SVG.
             previous = _filename(algorithm,palette_size,blur,version=1)
@@ -595,6 +603,7 @@ class TraceCache:
             node = simplify_icon(sample,(0,0,sample.width,sample.height),
                                  allow_raster=True,smooth=algorithm=='smooth-palette',
                                  pixel_boundaries=algorithm=='pixel-boundary',
+                                 no_estimated_alpha=no_estimated_alpha,
                                  palette_size=palette_size,blur=blur,background=bg,
                                  previews=previews)
             candidate_svg = _make_svg(node) if node is not None and node.kind=='capture-artwork' else None
@@ -663,7 +672,7 @@ class TraceCache:
 
 
 def trace(image, background, *, cache_dir=None, algorithm='palette', palette_size=None,
-          blur=.5, allow_raster=True, name=None):
+          blur=.5, allow_raster=True, name=None, no_estimated_alpha=False):
     """Trace an image over RGB background, returning an inline node and SVG.
 
     The SVG on disk is the source of truth on every cache hit. ``cache_dir``
@@ -672,7 +681,8 @@ def trace(image, background, *, cache_dir=None, algorithm='palette', palette_siz
     """
     with TraceCache(cache_dir) as cache:
         return cache.trace(image,background,algorithm=algorithm,
-                           palette_size=palette_size,blur=blur,allow_raster=allow_raster,name=name)
+                           palette_size=palette_size,blur=blur,allow_raster=allow_raster,
+                           name=name,no_estimated_alpha=no_estimated_alpha)
 
 
 def main(argv=None):
@@ -686,12 +696,15 @@ def main(argv=None):
                         default='palette')
     parser.add_argument('--palette-size',type=int)
     parser.add_argument('--blur',type=float,default=.5)
+    parser.add_argument('--no-estimated-alpha',action='store_true',
+                        help='Use the supplied background as a palette reference; omit it from SVG')
     parser.add_argument('--name',help='Optional human label for this source image')
     args=parser.parse_args(argv)
     with Image.open(args.image) as image:
         result=trace(image,args.background,cache_dir=args.cache_dir,
                      algorithm=args.algorithm,palette_size=args.palette_size,
-                     blur=args.blur,name=args.name)
+                     blur=args.blur,name=args.name,
+                     no_estimated_alpha=args.no_estimated_alpha)
     if result.svg_path:
         print(result.svg_path)
         return 0

@@ -117,6 +117,10 @@ then fits straight segments and Bézier curves. Tune blur with `--icon-blur RADI
 Icons that lose too much detail retain the usual bitmap fallback.
 Use `--pixel-boundary-icons` to trace the unsmoothed quantized pixel grid exactly.
 Its paths contain only horizontal and vertical segments and may be much larger.
+Use `--no-estimated-alpha` with any icon tracer to turn off inferred alpha:
+the selected background becomes the first palette colour, but its layer is
+omitted from the SVG. The remaining paths can be drawn over another background.
+`svgshot-trace` takes the background as its second argument and accepts the same switch.
 
 Traced icons are saved in a local cache so repeated captures can reuse their
 artwork. The cache holds each observed icon crop as a PNG and editable,
@@ -143,6 +147,8 @@ an RGB triple). The result contains `.svg` (the standalone file contents),
 `.source_hash`, `.offset`, and `.match`. The optional `name` argument records an
 accessible label for the source bitmap. `algorithm="smooth-palette"` selects the
 smoothed tracer; `algorithm="pixel-boundary"` selects exact grid tracing.
+`no_estimated_alpha=True` uses the background as a palette reference without
+exporting it as a path.
 To trace one crop from a shell, run
 `svgshot-trace icon.png '#ffffff' --cache-dir ./icon-cache`; it prints the SVG
 file to edit. Each canonical group has its observed PNGs in `bitmaps/` and
