@@ -34,7 +34,7 @@ class Options:
     font_family: str = "auto"
     smooth_icons: bool = False
     pixel_boundary_icons: bool = False
-    no_estimated_alpha: bool = False
+    estimate_alpha: bool = False
     icon_palette_size: int | None = None
     icon_blur: float = .5
     icon_cache_dir: str | None = None
@@ -1699,7 +1699,7 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
         root.children.append(Node("radio-group", (x,y,right-x,bottom-y), children=row))
     return simplify_scene_artwork(root, image, allow_raster=options.raster_fallback,
         smooth=options.smooth_icons, pixel_boundaries=options.pixel_boundary_icons,
-        no_estimated_alpha=options.no_estimated_alpha,
+        estimate_alpha=options.estimate_alpha,
         palette_size=options.icon_palette_size, blur=options.icon_blur,
         cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
 

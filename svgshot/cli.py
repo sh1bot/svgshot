@@ -52,8 +52,8 @@ def _parser():
                            help="Blur, upscale and fit curves to quantized icon contours")
     icon_mode.add_argument("--pixel-boundary-icons", action="store_true",
                            help="Trace quantized pixels exactly using horizontal and vertical lines")
-    parser.add_argument("--no-estimated-alpha", action="store_true",
-                        help="Use the selected background as a palette reference, omitted from SVG")
+    parser.add_argument("--estimate-alpha", action="store_true",
+                        help="Infer icon transparency from its captured background")
     parser.add_argument("--icon-palette-size", type=int, metavar="N",
                         help="Icon palette size (2–32; default: automatic for fitted tracers, 4 for exact colour tracing)")
     parser.add_argument("--icon-blur", type=float, metavar="RADIUS",
@@ -97,8 +97,8 @@ def _convert(data, snapshot, output, args):
         options.smooth_icons = True
     if args.pixel_boundary_icons:
         options.pixel_boundary_icons = True
-    if args.no_estimated_alpha:
-        options.no_estimated_alpha = True
+    if args.estimate_alpha:
+        options.estimate_alpha = True
     if options.smooth_icons and options.pixel_boundary_icons:
         raise ValueError("smooth_icons and pixel_boundary_icons cannot both be enabled")
     if args.icon_palette_size is not None:
@@ -127,7 +127,7 @@ def _convert(data, snapshot, output, args):
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
         simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback,
             smooth=options.smooth_icons, pixel_boundaries=options.pixel_boundary_icons,
-            no_estimated_alpha=options.no_estimated_alpha,
+            estimate_alpha=options.estimate_alpha,
             palette_size=options.icon_palette_size, blur=options.icon_blur,
             cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
         def serialize():

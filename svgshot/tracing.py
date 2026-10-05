@@ -88,6 +88,51 @@ def _fingerprint_might_match(query, known, query_size, known_size):
     return all(abs(a-b)<=limit for a,b in zip(query,known))
 
 
+def _sample_fingerprint(image, background):
+    """Store actual composited pixels on an even grid for a cheap match bound."""
+    pixels = np.asarray(image.convert('RGBA'),dtype=np.float32)
+    alpha = pixels[::2,::2,3:]/255
+    rgb = pixels[::2,::2,:3]*alpha+np.asarray(background,dtype=np.float32)*(1-alpha)
+    return np.rint(rgb).astype(np.uint8).tobytes()
+
+
+def _sample_might_match(query, known, query_size, known_size):
+    """Reject if sampled disagreements alone exceed the full match's 95th percentile."""
+    width,height = known_size
+    expected = ((height+1)//2)*((width+1)//2)*3
+    if len(known)!=expected:
+        return True
+    sample = np.frombuffer(known,dtype=np.uint8).reshape((height+1)//2,(width+1)//2,3)
+    for dy in (-1,0,1):
+        for dx in (-1,0,1):
+            y0,x0=max(0,dy),max(0,dx)
+            ky,kx=max(0,-dy),max(0,-dx)
+            h=min(query_size[1]-y0,height-ky)
+            w=min(query_size[0]-x0,width-kx)
+            if h < min(query_size[1],height)-1 or w < min(query_size[0],width)-1:
+                continue
+            limit=.05*h*w+2
+            coarse_y=np.arange(ky+(-ky)%4,ky+h,4)
+            coarse_x=np.arange(kx+(-kx)%4,kx+w,4)
+            if len(coarse_y)*len(coarse_x)>limit:
+                observed=query[np.ix_(coarse_y+dy,coarse_x+dx)]
+                reference=sample[np.ix_(coarse_y//2,coarse_x//2)].astype(np.float32)
+                if np.count_nonzero(np.abs(observed-reference).mean(axis=2)>13)>limit:
+                    continue
+            ys=np.arange(ky+(ky%2),ky+h,2)
+            xs=np.arange(kx+(kx%2),kx+w,2)
+            if not len(ys) or not len(xs):
+                continue
+            observed=query[np.ix_(ys+dy,xs+dx)]
+            reference=sample[np.ix_(ys//2,xs//2)].astype(np.float32)
+            # Stored RGB rounds by at most half a level; 13 is a conservative
+            # threshold for the precise comparator's 12-level p95 limit.
+            errors=np.abs(observed-reference).mean(axis=2)
+            if np.count_nonzero(errors>13) <= limit:
+                return True
+    return False
+
+
 def _atomic_bytes(path, contents):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
@@ -101,12 +146,12 @@ def _atomic_bytes(path, contents):
 
 
 def _filename(algorithm, palette_size, blur, *, version=VERSION,
-              no_estimated_alpha=False):
+              estimate_alpha=False):
     if not re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_-]{0,50}', algorithm):
         raise ValueError('algorithm names must use letters, digits, hyphens or underscores')
     settings = [version,algorithm,palette_size,
                 blur if algorithm == 'smooth-palette' else None]
-    if no_estimated_alpha:
+    if not estimate_alpha:
         settings.append('no-estimated-alpha')
     settings = json.dumps(settings,separators=(',', ':'))
     return f'{algorithm}-{hashlib.sha256(settings.encode()).hexdigest()[:16]}'
@@ -281,7 +326,8 @@ class TraceCache:
               hash TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups(id),
               background TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
               dx REAL NOT NULL DEFAULT 0, dy REAL NOT NULL DEFAULT 0,
-              match_kind TEXT NOT NULL DEFAULT 'unrecorded', fingerprint BLOB);
+              match_kind TEXT NOT NULL DEFAULT 'unrecorded', fingerprint BLOB,
+              sample BLOB);
             CREATE TABLE IF NOT EXISTS traces (
               group_id TEXT NOT NULL REFERENCES groups(id), algorithm TEXT NOT NULL,
               status TEXT NOT NULL, hints TEXT NOT NULL DEFAULT '{}',
@@ -300,14 +346,11 @@ class TraceCache:
             self.db.execute("ALTER TABLE bitmaps ADD COLUMN match_kind TEXT NOT NULL DEFAULT 'unrecorded'")
         if 'fingerprint' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
             self.db.execute('ALTER TABLE bitmaps ADD COLUMN fingerprint BLOB')
+        if 'sample' not in [row[1] for row in self.db.execute('PRAGMA table_info(bitmaps)')]:
+            self.db.execute('ALTER TABLE bitmaps ADD COLUMN sample BLOB')
         self.db.execute('DROP INDEX IF EXISTS bitmap_dimensions')
-        review_marker = self.root/'.review-pages-v5'
-        if not review_marker.is_file():
-            for group, in self.db.execute('SELECT DISTINCT group_id FROM traces WHERE status=?',
-                                          ('vector',)).fetchall():
-                self._restore_previews(group)
-                self._refresh_review_pages(group)
-            _atomic_bytes(review_marker,b'1\n')
+        (self.root/'.review-pages-v5').unlink(missing_ok=True)
+        (self.root/'.review-pages-v6').unlink(missing_ok=True)
 
     def close(self):
         self.db.close()
@@ -329,8 +372,86 @@ class TraceCache:
     def _svg_path(self, group, algorithm):
         return self.root/'groups'/group/'algorithms'/f'{algorithm}.svg'
 
+    def _summary_path(self, group):
+        return self.root/'summaries'/group
+
+    def _review_path(self, group):
+        return self._summary_path(group)/'review.html'
+
     def _preview_path(self, group, algorithm, stage):
-        return self._svg_path(group,algorithm).with_name(f'{algorithm}.{stage}.png')
+        return self._summary_path(group)/f'{algorithm}.{stage}.png'
+
+    def _summary_json(self, path, value):
+        data=(json.dumps(value,ensure_ascii=False,separators=(',',':'))+'\n').encode('utf-8')
+        if not path.is_file() or path.read_bytes()!=data:
+            _atomic_bytes(path,data)
+
+    def _sync_summary(self, group):
+        """Materialize index facts beside the trace diagnostics for offline review."""
+        directory=self._summary_path(group)
+        background,=self.db.execute('SELECT background FROM groups WHERE id=?',
+                                    (group,)).fetchone()
+        self._summary_json(directory/'group.json',{'id':group,'background':background})
+        names={}
+        for digest,name in self.db.execute('''SELECT n.hash,n.name FROM names n
+            JOIN bitmaps b ON b.hash=n.hash WHERE b.group_id=? ORDER BY n.name''',(group,)):
+            names.setdefault(digest,[]).append(name)
+        for digest,width,height,dx,dy,kind in self.db.execute('''
+                SELECT hash,width,height,dx,dy,match_kind FROM bitmaps
+                WHERE group_id=?''',(group,)):
+            self._summary_json(directory/f'{digest}.source.json',
+                {'hash':digest,'width':width,'height':height,'dx':dx,'dy':dy,
+                 'match_kind':kind,'names':names.get(digest,[])})
+        for algorithm,status,hints,generated_hash in self.db.execute('''
+                SELECT algorithm,status,hints,generated_hash FROM traces
+                WHERE group_id=?''',(group,)):
+            self._summary_json(directory/f'{algorithm}.trace.json',
+                {'algorithm':algorithm,'status':status,'hints':json.loads(hints),
+                 'generated_hash':generated_hash})
+
+    def _migrate_group_layout(self, group):
+        """Move former SVG-adjacent diagnostics into a separate review tree."""
+        directory = self.root/'groups'/group/'algorithms'
+        (self.root/'groups'/group/'review.html').unlink(missing_ok=True)
+        for algorithm, in self.db.execute('SELECT algorithm FROM traces WHERE group_id=?',
+                                          (group,)).fetchall():
+            old_paths=list(directory.glob(f'{algorithm}.*'))
+            old_paths.extend((self.root/'groups'/group/'diagnostics'/algorithm).glob('*'))
+            for old in old_paths:
+                if old.name == f'{algorithm}.html':
+                    old.unlink()
+                    continue
+                remainder = (old.name[len(algorithm)+1:] if old.parent==directory else old.name)
+                if '.' not in remainder:
+                    continue
+                stage, suffix = remainder.rsplit('.',1)
+                if ((stage in ('target','quantized','islands') or
+                     re.fullmatch(r'layer-\d+',stage)) and suffix == 'png') or \
+                        (stage == 'palette' and suffix == 'json'):
+                    new = self._preview_path(group,algorithm,stage).with_suffix('.'+suffix)
+                    new.parent.mkdir(parents=True,exist_ok=True)
+                    if new.exists():
+                        old.unlink()
+                    else:
+                        old.replace(new)
+            previous=self.root/'groups'/group/'diagnostics'/algorithm
+            if previous.is_dir() and not any(previous.iterdir()):
+                previous.rmdir()
+        old_diagnostics=self.root/'groups'/group/'diagnostics'
+        if old_diagnostics.is_dir() and not any(old_diagnostics.iterdir()):
+            old_diagnostics.rmdir()
+
+    def _review_stale(self, group):
+        page = self._review_path(group)
+        if not page.is_file():
+            return True
+        updated = page.stat().st_mtime_ns
+        for algorithm, in self.db.execute('SELECT algorithm FROM traces WHERE group_id=?',
+                                          (group,)):
+            svg = self._svg_path(group,algorithm)
+            if svg.is_file() and svg.stat().st_mtime_ns > updated:
+                return True
+        return False
 
     def _write_previews(self, group, algorithm, previews):
         _atomic_bytes(self._preview_path(group,algorithm,'palette').with_suffix('.json'),
@@ -365,7 +486,7 @@ class TraceCache:
             previews = {}
             node = simplify_icon(image,(0,0,*image.size),smooth=algorithm.startswith('smooth-palette-'),
                                  pixel_boundaries=algorithm.startswith('pixel-boundary-'),
-                                 no_estimated_alpha=hints.get('no_estimated_alpha',False),
+                                 estimate_alpha=not hints.get('no_estimated_alpha',False),
                                  palette_size=selected_palette,
                                  blur=hints.get('blur_radius',.5),background=_background(background),
                                  previews=previews)
@@ -377,19 +498,22 @@ class TraceCache:
                 self._write_previews(group,algorithm,previews)
 
     def _refresh_review_pages(self, group):
-        background, = self.db.execute('SELECT background FROM groups WHERE id=?',
-                                      (group,)).fetchone()
-        variants = self.db.execute('''SELECT hash,width,height,dx,dy,match_kind FROM bitmaps
-            WHERE group_id=? ORDER BY CASE WHEN hash=? THEN 0 ELSE 1 END, hash''',
-            (group,group)).fetchall()
+        """Build the page from summary files; the database is not read here."""
+        directory=self._summary_path(group)
+        background=json.loads((directory/'group.json').read_text(encoding='utf-8'))['background']
+        sources=[json.loads(path.read_text(encoding='utf-8'))
+                 for path in directory.glob('*.source.json')]
+        sources.sort(key=lambda item:(item['hash']!=group,item['hash']))
+        variants=[(item['hash'],item['width'],item['height'],item['dx'],item['dy'],
+                   item['match_kind']) for item in sources]
         if not variants:
             return
-        by_hash = {}
-        for digest,name in self.db.execute('''SELECT n.hash,n.name FROM names n
-            JOIN bitmaps b ON b.hash=n.hash WHERE b.group_id=? ORDER BY n.name''',(group,)):
-            by_hash.setdefault(digest,[]).append(name)
-        traces = self.db.execute('''SELECT algorithm,status,hints,generated_hash FROM traces
-            WHERE group_id=? ORDER BY algorithm''',(group,)).fetchall()
+        by_hash={item['hash']:item['names'] for item in sources}
+        records=[json.loads(path.read_text(encoding='utf-8'))
+                 for path in directory.glob('*.trace.json')]
+        records.sort(key=lambda item:item['algorithm'])
+        traces=[(item['algorithm'],item['status'],item['hints'],item['generated_hash'])
+                for item in records]
         w,h = variants[0][1:3]
         observations = []
         for index,(digest,width,height,dx,dy,match_kind) in enumerate(variants,1):
@@ -398,7 +522,7 @@ class TraceCache:
             labels = ''.join(f'<li>{escape(name)}</li>' for name in names)
             observations.append(
                 f'<article><h3>Bitmap {index}: {escape(label)}</h3>'
-                f'<img class="source-preview" src="../bitmaps/{digest}.png" '
+                f'<img class="source-preview" src="../../groups/{group}/bitmaps/{digest}.png" '
                 f'width="{width*16}" height="{height*16}" '
                 f'alt="Source bitmap: {escape(label,quote=True)}">'
                 f'<dl><dt>Source SHA-256</dt><dd><code>{digest}</code></dd>'
@@ -412,9 +536,8 @@ class TraceCache:
                        ('blur_radius','Blur radius'),('layering','Layering'),
                        ('icon_opacity','Group opacity'),('clip_to_first','Clipped to silhouette'))
         trace_cards = []
-        for algorithm,status,stored_hints,generated_hash in traces:
+        for algorithm,status,hints,generated_hash in traces:
             svg_path = self._svg_path(group,algorithm)
-            hints = json.loads(stored_hints)
             pairs = [(label,hints[key]) for key,label in diagnostics if key in hints]
             pairs.extend((key.replace('_',' ').capitalize(),value)
                          for key,value in sorted(hints.items())
@@ -462,10 +585,10 @@ class TraceCache:
                 body = palette_html + '<div class="stages">' + (preview_html or
                         '<p>Intermediate images unavailable for this older trace.</p>') + (
                         f'<figure><figcaption>SVG trace</figcaption>'
-                        f'<img class="vector-preview" src="{escape(svg_path.name,quote=True)}" '
+                        f'<img class="vector-preview" src="../../groups/{group}/algorithms/{escape(svg_path.name,quote=True)}" '
                         f'width="{w*16}" height="{h*16}" '
                         f'alt="SVG trace from {escape(algorithm,quote=True)}"></figure></div>'
-                        f'<p><a href="{escape(svg_path.name,quote=True)}">Open SVG</a> · '
+                        f'<p><a href="../../groups/{group}/algorithms/{escape(svg_path.name,quote=True)}">Open SVG</a> · '
                         f'{len(current_svg)} bytes</p>'
                         + ('<p class="edited">SVG edited since tracing; initial quality metrics '
                            'may no longer describe it.</p>' if edited else '')
@@ -474,60 +597,53 @@ class TraceCache:
                 body = '<p>No SVG met the trace quality threshold.</p>' if status != 'vector' else \
                        '<p>The cached SVG file is missing.</p>'
             trace_cards.append((algorithm,body))
-        for algorithm,status,_,_ in traces:
-            if status!='vector':
-                continue
-            svg_path = self._svg_path(group,algorithm)
-            if not svg_path.is_file():
-                continue
-            artwork = ''.join(
-                f'<article{ " class=\"selected\"" if name==algorithm else ""}'
-                f' data-algorithm="{escape(name,quote=True)}">'
-                f'<h3>{escape(name)}</h3>{body}</article>' for name,body in trace_cards)
-            markup = ('<!doctype html><html lang="en"><meta charset="utf-8">'
-                      f'<title>Icon comparison: {escape(algorithm)}</title>'
-                      f'<style>:root{{--icon-background:{background}}}'
-                      'body{font:16px system-ui,sans-serif;color:#181818;background:#fafafa;'
-                      'margin:1.5rem}main{display:grid;grid-template-columns:minmax(0,1fr) '
-                      'minmax(0,1fr);gap:1.5rem}section{min-width:0}article{overflow:auto;'
-                      'margin-bottom:1.5rem;border:1px solid #aaa;padding:1rem;background:#fff}'
-                      'article.selected{border:3px solid #2669ac}img{max-width:none;'
-                      'background-color:#f2f2f2;'
-                      'background-image:repeating-conic-gradient(from 45deg,'
-                      '#c8c8c8 0 25%,#f2f2f2 0 50%);background-size:20px 20px;'
-                      'border:1px solid #777}'
-                      '#captured-background:checked ~ main img{background:var(--icon-background)}'
-                      '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
-                      '.stage-preview{image-rendering:pixelated}figure{margin:1rem 0}'
-                      'figcaption{font-weight:bold;margin-bottom:.3rem}'
-                      '.palette{display:flex;flex-wrap:wrap;gap:.75rem;list-style:none;padding:0}'
-                      '.palette li{display:flex;align-items:center;gap:.35rem}'
-                      '.swatch{display:inline-block;width:2.5rem;height:2.5rem;'
-                      'border:1px solid #555;flex:none}'
-                      '.stages{display:grid;grid-template-columns:repeat(auto-fit,'
-                      'minmax(min(100%,290px),1fr));gap:1rem}.stages figure{overflow:auto}'
-                      'dd{margin:0 0 .35rem 0}dl{margin:.6rem 0;display:grid;'
-                      'grid-template-columns:max-content minmax(0,1fr);column-gap:.7rem}'
-                      'code{overflow-wrap:anywhere}.edited{font-weight:bold;color:#a33}'
-                      '@media(max-width:700px){main{display:block}}'
-                      '</style>'
-                      f'<h1>Icon comparison</h1><p>Canonical group: <code>{group}</code>. '
-                      f'Background: <code>{background}</code>. '
-                      f'{len(variants)} source bitmap(s) and {len(traces)} trace result(s). '
-                      'Images are shown at 16×; bitmap scaling uses nearest neighbour.</p>'
-                      '<input type="checkbox" id="captured-background">'
-                      '<label for="captured-background">Show captured background</label>'
-                      '<p>The diagonal checker indicates transparency.</p>'
-                      '<main><section><h2>Observed bitmaps</h2>'
-                      + ''.join(observations) + '</section><section><h2>Algorithm results</h2>'
-                      + artwork + '</section></main></html>\n')
-            page = svg_path.with_suffix('.html')
-            data = markup.encode('utf-8')
-            if not page.is_file() or page.read_bytes()!=data:
-                _atomic_bytes(page,data)
+        artwork = ''.join(
+            f'<article data-algorithm="{escape(name,quote=True)}">'
+            f'<h3>{escape(name)}</h3>{body}</article>' for name,body in trace_cards)
+        markup = ('<!doctype html><html lang="en"><meta charset="utf-8">'
+                  f'<title>Icon comparison: {group}</title>'
+                  f'<style>:root{{--icon-background:{background}}}'
+                  'body{font:16px system-ui,sans-serif;color:#181818;background:#fafafa;'
+                  'margin:1.5rem}main{display:grid;grid-template-columns:minmax(0,1fr) '
+                  'minmax(0,1fr);gap:1.5rem}section{min-width:0}article{overflow:auto;'
+                  'margin-bottom:1.5rem;border:1px solid #aaa;padding:1rem;background:#fff}'
+                  'img{max-width:none;'
+                  'background-color:#f2f2f2;'
+                  'background-image:repeating-conic-gradient(from 45deg,'
+                  '#c8c8c8 0 25%,#f2f2f2 0 50%);background-size:20px 20px;'
+                  'border:1px solid #777}'
+                  '#captured-background:checked ~ main img{background:var(--icon-background)}'
+                  '.source-preview{image-rendering:pixelated}dt{font-weight:bold}'
+                  '.stage-preview{image-rendering:pixelated}figure{margin:1rem 0}'
+                  'figcaption{font-weight:bold;margin-bottom:.3rem}'
+                  '.palette{display:flex;flex-wrap:wrap;gap:.75rem;list-style:none;padding:0}'
+                  '.palette li{display:flex;align-items:center;gap:.35rem}'
+                  '.swatch{display:inline-block;width:2.5rem;height:2.5rem;'
+                  'border:1px solid #555;flex:none}'
+                  '.stages{display:grid;grid-template-columns:repeat(auto-fit,'
+                  'minmax(min(100%,290px),1fr));gap:1rem}.stages figure{overflow:auto}'
+                  'dd{margin:0 0 .35rem 0}dl{margin:.6rem 0;display:grid;'
+                  'grid-template-columns:max-content minmax(0,1fr);column-gap:.7rem}'
+                  'code{overflow-wrap:anywhere}.edited{font-weight:bold;color:#a33}'
+                  '@media(max-width:700px){main{display:block}}'
+                  '</style>'
+                  f'<h1>Icon comparison</h1><p>Canonical group: <code>{group}</code>. '
+                  f'Background: <code>{background}</code>. '
+                  f'{len(variants)} source bitmap(s) and {len(traces)} trace result(s). '
+                  'Images are shown at 16×; bitmap scaling uses nearest neighbour.</p>'
+                  '<input type="checkbox" id="captured-background">'
+                  '<label for="captured-background">Show captured background</label>'
+                  '<p>The diagonal checker indicates transparency.</p>'
+                  '<main><section><h2>Observed bitmaps</h2>'
+                  + ''.join(observations) + '</section><section><h2>Algorithm results</h2>'
+                  + artwork + '</section></main></html>\n')
+        page = self._review_path(group)
+        data = markup.encode('utf-8')
+        if not page.is_file() or page.read_bytes()!=data:
+            _atomic_bytes(page,data)
 
     def trace(self, image, background, *, algorithm='palette', palette_size=None, blur=.5,
-              allow_raster=True, name=None, no_estimated_alpha=False):
+              allow_raster=True, name=None, estimate_alpha=False):
         image = image.copy()
         if not image.width or not image.height:
             raise ValueError('The image to trace must be nonempty')
@@ -535,11 +651,13 @@ class TraceCache:
         rgb = '#%02x%02x%02x'%background
         if algorithm not in ('palette','smooth-palette','pixel-boundary'):
             raise ValueError('Unknown tracing algorithm: '+algorithm)
-        key = _filename(algorithm,palette_size,blur,no_estimated_alpha=no_estimated_alpha)
+        key = _filename(algorithm,palette_size,blur,estimate_alpha=estimate_alpha)
         digest = _hash(image,background)
         row = self.db.execute('SELECT group_id,dx,dy FROM bitmaps WHERE hash=?',(digest,)).fetchone()
+        changed = row is None
         match = 'exact' if row else None
         fingerprint = None
+        query_pixels = None
         if row:
             group,dx,dy = row
         else:
@@ -547,12 +665,15 @@ class TraceCache:
             # Fuzzy matching is scoped to the same background and near-equal
             # dimensions. Each observed source image remains independently saved.
             fingerprint = _fingerprint(image,background)
-            candidates = self.db.execute('''SELECT hash,group_id,dx,dy,width,height,fingerprint
+            query_pixels = np.asarray(image.convert('RGBA'),dtype=np.float32)
+            alpha = query_pixels[:,:,3:]/255
+            query_pixels = query_pixels[:,:,:3]*alpha+np.asarray(background,dtype=np.float32)*(1-alpha)
+            candidates = self.db.execute('''SELECT hash,group_id,dx,dy,width,height,fingerprint,sample
                 FROM bitmaps WHERE background=? AND width BETWEEN ? AND ?
                 AND height BETWEEN ? AND ?''',
                 (rgb,image.width-1,image.width+1,image.height-1,image.height+1))
             best = None
-            for known_hash, known_group, known_dx, known_dy, width, height, known_fp in candidates:
+            for known_hash, known_group, known_dx, known_dy, width, height, known_fp, sampled in candidates:
                 known_image = None
                 if known_fp is None:  # Index created by a previous version: backfill on demand.
                     known_image = self._bitmap(known_hash)
@@ -562,6 +683,14 @@ class TraceCache:
                                         (known_fp,known_hash))
                 if not _fingerprint_might_match(fingerprint,known_fp,
                                                 image.size,(width,height)):
+                    continue
+                if sampled is None:
+                    known_image = known_image or self._bitmap(known_hash)
+                    sampled = _sample_fingerprint(known_image,background)
+                    with self.db:
+                        self.db.execute('UPDATE bitmaps SET sample=? WHERE hash=?',
+                                        (sampled,known_hash))
+                if not _sample_might_match(query_pixels,sampled,image.size,(width,height)):
                     continue
                 similarity = _bitmap_match(image,known_image or self._bitmap(known_hash),background)
                 if similarity and (best is None or similarity[0] < best[0]):
@@ -575,10 +704,11 @@ class TraceCache:
         registered = existing is not None
         if existing and existing[0]=='vector' and not self._svg_path(group,key).is_file():
             existing = None  # An SVG removed for retracing is regenerated.
-        if not registered and match and algorithm == 'palette' and not no_estimated_alpha:
+        if not registered and match and algorithm == 'palette' and estimate_alpha:
             # A new tracer version must not silently discard hand edits made
             # to the previous version's standalone SVG.
-            previous = _filename(algorithm,palette_size,blur,version=1)
+            previous = _filename(algorithm,palette_size,blur,version=1,
+                                 estimate_alpha=True)
             old = self.db.execute('''SELECT status,hints,generated_hash FROM traces
                 WHERE group_id=? AND algorithm=?''',(group,previous)).fetchone()
             old_path = self._svg_path(group,previous)
@@ -603,7 +733,7 @@ class TraceCache:
             node = simplify_icon(sample,(0,0,sample.width,sample.height),
                                  allow_raster=True,smooth=algorithm=='smooth-palette',
                                  pixel_boundaries=algorithm=='pixel-boundary',
-                                 no_estimated_alpha=no_estimated_alpha,
+                                 estimate_alpha=estimate_alpha,
                                  palette_size=palette_size,blur=blur,background=bg,
                                  previews=previews)
             candidate_svg = _make_svg(node) if node is not None and node.kind=='capture-artwork' else None
@@ -625,16 +755,18 @@ class TraceCache:
             with self.db:
                 self.db.execute('INSERT OR IGNORE INTO groups VALUES (?,?,?)',(group,rgb,group))
                 self.db.execute('''INSERT OR IGNORE INTO bitmaps
-                    (hash,group_id,background,width,height,dx,dy,match_kind,fingerprint)
-                    VALUES (?,?,?,?,?,?,?,?,?)''',
+                    (hash,group_id,background,width,height,dx,dy,match_kind,fingerprint,sample)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)''',
                     (digest,group,rgb,image.width,image.height,dx,dy,match or 'new',
-                     fingerprint))
+                     fingerprint,_sample_fingerprint(image,background)))
         if isinstance(name,str):
             name = ' '.join(name.split())
             if name:
                 with self.db:
-                    self.db.execute('INSERT OR IGNORE INTO names VALUES (?,?)',(digest,name))
+                    changed |= bool(self.db.execute(
+                        'INSERT OR IGNORE INTO names VALUES (?,?)',(digest,name)).rowcount)
         if not existing:
+            changed = True
             status = 'vector' if candidate_svg else 'raster' if node is not None else 'empty'
             hints = {k:v for k,v in node.vector_data.items() if k not in
                      ('paths','local','icon_size')} if candidate_svg else {}
@@ -665,14 +797,20 @@ class TraceCache:
                         vector_data={'icon_fallback':True})
         else:
             result=None
-        self._refresh_review_pages(group)
+        if not self._review_path(group).is_file():
+            self._migrate_group_layout(group)
+            self._restore_previews(group)
+            changed = True
+        if changed or self._review_stale(group):
+            self._sync_summary(group)
+            self._refresh_review_pages(group)
         path = self._svg_path(group,key) if svg else None
-        return TraceResult(result,svg,path,path.with_suffix('.html') if path else None,
+        return TraceResult(result,svg,path,self._review_path(group),
                            digest,group,(dx,dy),match or 'new')
 
 
 def trace(image, background, *, cache_dir=None, algorithm='palette', palette_size=None,
-          blur=.5, allow_raster=True, name=None, no_estimated_alpha=False):
+          blur=.5, allow_raster=True, name=None, estimate_alpha=False):
     """Trace an image over RGB background, returning an inline node and SVG.
 
     The SVG on disk is the source of truth on every cache hit. ``cache_dir``
@@ -682,7 +820,7 @@ def trace(image, background, *, cache_dir=None, algorithm='palette', palette_siz
     with TraceCache(cache_dir) as cache:
         return cache.trace(image,background,algorithm=algorithm,
                            palette_size=palette_size,blur=blur,allow_raster=allow_raster,
-                           name=name,no_estimated_alpha=no_estimated_alpha)
+                           name=name,estimate_alpha=estimate_alpha)
 
 
 def main(argv=None):
@@ -696,15 +834,15 @@ def main(argv=None):
                         default='palette')
     parser.add_argument('--palette-size',type=int)
     parser.add_argument('--blur',type=float,default=.5)
-    parser.add_argument('--no-estimated-alpha',action='store_true',
-                        help='Use the supplied background as a palette reference; omit it from SVG')
+    parser.add_argument('--estimate-alpha',action='store_true',
+                        help='Infer icon transparency from its captured background')
     parser.add_argument('--name',help='Optional human label for this source image')
     args=parser.parse_args(argv)
     with Image.open(args.image) as image:
         result=trace(image,args.background,cache_dir=args.cache_dir,
                      algorithm=args.algorithm,palette_size=args.palette_size,
                      blur=args.blur,name=args.name,
-                     no_estimated_alpha=args.no_estimated_alpha)
+                     estimate_alpha=args.estimate_alpha)
     if result.svg_path:
         print(result.svg_path)
         return 0

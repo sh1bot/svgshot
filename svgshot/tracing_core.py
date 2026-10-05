@@ -642,13 +642,13 @@ def _vector_candidate(target, monochrome, box, palette_size=None, *, capture=Fal
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None, blur=.5,
                   background=None, previews=None, pixel_boundaries=False,
-                  no_estimated_alpha=False):
+                  estimate_alpha=False):
     """Prefer a bounded vector approximation; retain PNG when it loses detail."""
     x,y,w,h = box
     if ((palette_size is not None and (not isinstance(palette_size, int) or not 2 <= palette_size <= 32))
             or not np.isfinite(blur) or not 0 <= blur <= 4):
         raise ValueError('icon palette size must be 2–32 and blur radius 0–4 source pixels')
-    if no_estimated_alpha:
+    if not estimate_alpha:
         if background is None:
             background = _background_color(image,box)
         background = tuple(int(c) for c in background)
@@ -660,7 +660,7 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
     if pixel_boundaries:
         exact = _pixel_candidate(target,monochrome,box,palette_size,
                                  capture=previews is not None,
-                                 background=background if no_estimated_alpha else None)
+                                 background=background if not estimate_alpha else None)
         if exact is not None:
             node,stages = exact
             if previews is not None:
@@ -670,15 +670,15 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
         if not smooth:
             return _vector_candidate(target, monochrome, box, palette_size,
                                      capture=previews is not None,
-                                     background=background if no_estimated_alpha else None)
+                                     background=background if not estimate_alpha else None)
         choices = [_smooth_candidate(target, box, count, blur,
                                      capture=previews is not None,
-                                     background=background if no_estimated_alpha else None)
+                                     background=background if not estimate_alpha else None)
                    for count in _palette_counts(monochrome, palette_size)]
         return min((choice for choice in choices if choice is not None),
                    key=lambda choice: choice[0], default=None)
     best = candidate(target, monochrome)
-    if best is None and monochrome and not no_estimated_alpha:
+    if best is None and monochrome and estimate_alpha:
         target, _ = _target(image, box, force_colour=True, background=background)
         best = candidate(target, False)
     if best:

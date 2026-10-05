@@ -1,8 +1,9 @@
 """Place traced icon artwork into the recognized scene."""
 from __future__ import annotations
+from contextlib import nullcontext
 
 from .model import Node
-from .tracing import trace
+from .tracing import trace, TraceCache
 from .tracing_core import (_background_color, _bezier, _fit_curve, _icon_palette,
                            _sample_segment, _smooth_quantize, _target,
                            _stacked_masks, simplify_icon as _uncached_simplify_icon)
@@ -10,21 +11,23 @@ from .tracing_core import (_background_color, _bezier, _fit_curve, _icon_palette
 
 def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=None,
                   blur=.5, cache_dir=False, name=None, pixel_boundaries=False,
-                  no_estimated_alpha=False):
+                  estimate_alpha=False, _cache=None):
     """Trace a crop, with optional disk cache; direct calls default to no cache."""
     if cache_dir is False:
         return _uncached_simplify_icon(image,box,allow_raster=allow_raster,
                                        smooth=smooth,palette_size=palette_size,blur=blur,
                                        pixel_boundaries=pixel_boundaries,
-                                       no_estimated_alpha=no_estimated_alpha,
-                                       background=_background_color(image,box) if no_estimated_alpha else None)
+                                       estimate_alpha=estimate_alpha,
+                                       background=_background_color(image,box) if not estimate_alpha else None)
     x,y,w,h=box
     background=_background_color(image,box)
-    result=trace(image.crop((x,y,x+w,y+h)),background,
-                 cache_dir=cache_dir,algorithm=('pixel-boundary' if pixel_boundaries else
-                                                'smooth-palette' if smooth else 'palette'),
-                 palette_size=palette_size,blur=blur,allow_raster=allow_raster,name=name,
-                 no_estimated_alpha=no_estimated_alpha)
+    runner = _cache.trace if _cache is not None else trace
+    options = {} if _cache is not None else {'cache_dir':cache_dir}
+    result=runner(image.crop((x,y,x+w,y+h)),background,
+                  **options,algorithm=('pixel-boundary' if pixel_boundaries else
+                                       'smooth-palette' if smooth else 'palette'),
+                  palette_size=palette_size,blur=blur,allow_raster=allow_raster,name=name,
+                  estimate_alpha=estimate_alpha)
     if result.node is not None:
         result.node.box=box
     return result.node
@@ -32,7 +35,7 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
 
 def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
                            palette_size=None, blur=.5, cache_dir=None,
-                           pixel_boundaries=False, no_estimated_alpha=False):
+                           pixel_boundaries=False, estimate_alpha=False):
     """Both recognition routes converge here, after control/text heuristics."""
     cache = {}
     def visit(parent):
@@ -54,8 +57,9 @@ def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
                 cache[key] = simplify_icon(image,node.box,allow_raster=allow_raster,
                                            smooth=smooth,palette_size=palette_size,
                                            blur=blur,cache_dir=cache_dir,
+                                           _cache=disk_cache,
                                            pixel_boundaries=pixel_boundaries,
-                                           no_estimated_alpha=no_estimated_alpha,
+                                           estimate_alpha=estimate_alpha,
                                            name=node.vector_data.get('accessible_name'))
             template = cache[key]
             replacement = (Node(template.kind, node.box, image_data=template.image_data,
@@ -66,5 +70,6 @@ def simplify_scene_artwork(scene, image, *, allow_raster=True, smooth=False,
             elif node.kind != 'raster' or allow_raster:
                 retained.append(node)
         parent.children = retained
-    visit(scene)
+    with (TraceCache(cache_dir) if cache_dir is not False else nullcontext()) as disk_cache:
+        visit(scene)
     return scene

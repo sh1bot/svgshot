@@ -1,7 +1,9 @@
 """Icon fidelity, transparency, shared recognition routes, and SVG reuse."""
 import tempfile
+import sqlite3
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 from PIL import Image, ImageDraw
 import numpy as np
@@ -23,6 +25,19 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_scene_shares_one_cache_connection_across_icons(self):
+        image=Image.new('RGB',(48,24),'white')
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((4,4,15,19),fill=(20,80,220))
+        draw.rectangle((28,4,39,19),fill=(20,80,220))
+        scene=Node('window',(0,0,48,24),children=[
+            Node('raster',(0,0,24,24)),Node('raster',(24,0,24,24))])
+        with tempfile.TemporaryDirectory() as directory, \
+             patch('svgshot.tracing.sqlite3.connect',wraps=sqlite3.connect) as connect:
+            simplify_scene_artwork(scene,image,cache_dir=directory)
+            self.assertEqual(connect.call_count,1)
+        self.assertEqual(len(scene.children),2)
+
     def test_original_tracer_preserves_square_tab_touching_crop_edge(self):
         image=Image.new('RGBA',(12,10))
         draw=ImageDraw.Draw(image)
@@ -79,7 +94,8 @@ class IconTests(unittest.TestCase):
         draw.rectangle((12, 12, 19, 19), fill=(220, 60, 20, 128))
         for smooth in (False, True):
             with self.subTest(smooth=smooth):
-                icon = simplify_icon(image, (0, 0, 32, 32), smooth=smooth, palette_size=2)
+                icon = simplify_icon(image, (0, 0, 32, 32), smooth=smooth, palette_size=2,
+                                     estimate_alpha=True)
                 self.assertEqual(icon.kind, 'capture-artwork')
                 self.assertAlmostEqual(icon.vector_data['icon_opacity'], 128/255, places=5)
                 self.assertTrue(all('opacity' not in p for p in icon.vector_data['paths']))
@@ -217,7 +233,8 @@ class IconTests(unittest.TestCase):
                            ((4,16,15,27),'blue'), ((16,16,27,27),'yellow')]:
             draw.rectangle(box, fill=color)
         for smooth in (False, True):
-            icon = simplify_icon(image, (0,0,32,32), smooth=smooth, palette_size=2)
+            icon = simplify_icon(image, (0,0,32,32), smooth=smooth, palette_size=2,
+                                 estimate_alpha=True)
             self.assertEqual(icon.kind, 'capture-artwork')
             self.assertLessEqual(len({p['fill'] for p in icon.vector_data['paths']}), 2)
             expected = {'#%02x%02x%02x' % tuple(c) for c in _icon_palette(image, 2)}
@@ -226,7 +243,7 @@ class IconTests(unittest.TestCase):
     def test_smooth_curves_keep_ring_hole_and_source_palette(self):
         image = Image.new('RGBA', (40, 40), (255, 0, 255, 0))
         ImageDraw.Draw(image).ellipse((6, 6, 33, 33), outline=(20, 80, 220, 255), width=5)
-        icon = simplify_icon(image, (0, 0, 40, 40), smooth=True)
+        icon = simplify_icon(image, (0, 0, 40, 40), smooth=True, estimate_alpha=True)
         self.assertEqual(icon.kind, 'capture-artwork')
         self.assertEqual(icon.vector_data['approximation'], 'smooth-palette')
         self.assertEqual(icon.vector_data['palette_size'], 1)
@@ -260,7 +277,7 @@ class IconTests(unittest.TestCase):
     def test_semitransparent_colour_keeps_opacity(self):
         image=Image.new('RGBA',(24,24),(20,80,220,0))
         ImageDraw.Draw(image).rectangle((5,5,18,18),fill=(20,80,220,128))
-        icon=simplify_icon(image,(0,0,24,24))
+        icon=simplify_icon(image,(0,0,24,24),estimate_alpha=True)
         self.assertEqual(icon.kind,'capture-artwork')
         self.assertAlmostEqual(icon.vector_data['paths'][0]['opacity'],.502,places=3)
         result=render_svg(to_svg(Node('window',(0,0,24,24),color='#ffffff',children=[icon])),24)
@@ -281,7 +298,7 @@ class IconTests(unittest.TestCase):
         image=Image.new('RGB',(40,40),'white')
         draw=ImageDraw.Draw(image)
         draw.ellipse((7,7,29,29),outline='#222222',width=3)
-        icon=simplify_icon(image,(3,3,34,34))
+        icon=simplify_icon(image,(3,3,34,34),estimate_alpha=True)
         self.assertEqual(icon.kind,'capture-artwork')
         self.assertEqual(icon.vector_data['approximation'],'monochrome')
         svg=to_svg(Node('window',(0,0,40,40),color='#ffffff',children=[icon]))
