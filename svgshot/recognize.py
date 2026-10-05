@@ -1212,7 +1212,8 @@ def _table_text(source, texts, language):
     return None, []
 
 
-def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> Node:
+def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=(),
+                source_image=None) -> Node:
     if image.width * image.height > 25_000_000:
         raise ValueError("PNG exceeds the 25-megapixel limit")
     rgb_image = image.convert("RGB")
@@ -1701,7 +1702,8 @@ def reconstruct(image: Image.Image, options: Options, *, artwork_boxes=()) -> No
         smooth=options.smooth_icons, pixel_boundaries=options.pixel_boundary_icons,
         estimate_alpha=options.estimate_alpha,
         palette_size=options.icon_palette_size, blur=options.icon_blur,
-        cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
+        cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False,
+        source_image=source_image)
 
 
 def _iou_boxes(a,b):

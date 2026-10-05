@@ -74,7 +74,7 @@ def _has_capture_options(args):
                 args.bitmap, args.window_bounds))
 
 
-def _convert(data, snapshot, output, args):
+def _convert(data, snapshot, output, args, source_image=None):
     """One recognition/export pipeline; metadata adds semantics and corrections."""
     if args.html and snapshot is None:
         raise ValueError("--html requires a PNG with embedded semantic data")
@@ -122,14 +122,16 @@ def _convert(data, snapshot, output, args):
         if snapshot is not None:
             validate_snapshot(snapshot, source)
         icons = semantic_icon_boxes(source, snapshot) if snapshot is not None else []
-        scene = reconstruct(source, options, artwork_boxes=icons)
+        scene = reconstruct(source, options, artwork_boxes=icons,
+                            source_image=source_image)
         if snapshot is not None:
             scene = merge_uia(scene, source, snapshot, options.language, ocr_enabled=options.ocr)
         simplify_scene_artwork(scene, source, allow_raster=options.raster_fallback,
             smooth=options.smooth_icons, pixel_boundaries=options.pixel_boundary_icons,
             estimate_alpha=options.estimate_alpha,
             palette_size=options.icon_palette_size, blur=options.icon_blur,
-            cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False)
+            cache_dir=options.icon_cache_dir if options.icon_cache_dir != '' else False,
+            source_image=source_image)
         def serialize():
             return (semantic_svg(scene, snapshot, options.font_family) if snapshot is not None
                     else to_svg(scene, options.font_family))
@@ -208,7 +210,9 @@ def main(argv=None) -> int:
             print("svgshot: PNG has no embedded semantic data; falling back to raw screenshot analysis.",
                   file=sys.stderr)
             snapshot = None
-        return _convert(data, snapshot, output, args)
+        source_image = (str(input_path.resolve()) if input_path else
+                        f'live capture → {output.resolve()}')
+        return _convert(data, snapshot, output, args, source_image)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError,
             subprocess.SubprocessError) as error:
         print(f"svgshot: {error}", file=sys.stderr)

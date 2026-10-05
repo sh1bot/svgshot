@@ -34,12 +34,16 @@ def icon(x=4, fill=(20, 80, 220)):
 class TraceCacheTests(TestCase):
     def test_review_pages_follow_all_variants_names_and_algorithms(self):
         with TemporaryDirectory() as folder:
-            first=trace(icon(),'#ffffff',cache_dir=folder,name='Blue <gear>')
+            first=trace(icon(),'#ffffff',cache_dir=folder,name='Blue <gear>',
+                        source_image='/captures/Explorer & settings.png')
             self.assertTrue(first.review_path.is_file())
-            shifted=trace(icon(5),'#ffffff',cache_dir=folder,name='Settings & Tools')
+            shifted=trace(icon(5),'#ffffff',cache_dir=folder,name='Settings & Tools',
+                          source_image='/captures/Services.png')
             alternate=trace(icon(),'#ffffff',cache_dir=folder,
                             algorithm='smooth-palette',name='Another name')
             exact=trace(icon(),'#ffffff',cache_dir=folder,algorithm='pixel-boundary')
+            trace(icon(),'#ffffff',cache_dir=folder,
+                  source_image='/captures/Second window.png')
             self.assertEqual({r.review_path for r in (first,shifted,alternate,exact)},
                              {first.review_path})
             self.assertEqual(list(first.review_path.parent.rglob('*.html')),
@@ -51,6 +55,11 @@ class TraceCacheTests(TestCase):
                 self.assertIn('Blue &lt;gear&gt;',page)
                 self.assertIn('Settings &amp; Tools',page)
                 self.assertIn('Another name',page)
+                self.assertEqual(result.review_path.name,'index.html')
+                self.assertIn('Used by image(s):',page)
+                self.assertIn('/captures/Explorer &amp; settings.png',page)
+                self.assertIn('/captures/Services.png',page)
+                self.assertIn('/captures/Second window.png',page)
                 self.assertIn(f'bitmaps/{first.source_hash}.png',page)
                 self.assertIn(f'bitmaps/{shifted.source_hash}.png',page)
                 self.assertIn('width="384" height="384"',page)
@@ -88,6 +97,10 @@ class TraceCacheTests(TestCase):
                 self.assertEqual(db.execute('SELECT name FROM names WHERE hash=?',
                                             (shifted.source_hash,)).fetchall(),
                                  [('Settings & Tools',)])
+                self.assertEqual(db.execute('SELECT image FROM source_images WHERE hash=? '
+                                            'ORDER BY image',(first.source_hash,)).fetchall(),
+                                 [('/captures/Explorer & settings.png',),
+                                  ('/captures/Second window.png',)])
 
     def test_review_pages_are_backfilled_for_an_existing_cache(self):
         with TemporaryDirectory() as folder:
@@ -96,6 +109,16 @@ class TraceCacheTests(TestCase):
             with TraceCache(folder) as cache:
                 cache.trace(icon(),'#ffffff')
             self.assertIn('Existing icon',result.review_path.read_text())
+
+    def test_existing_review_html_becomes_index_html(self):
+        with TemporaryDirectory() as folder:
+            result=trace(icon(),'#ffffff',cache_dir=folder)
+            old=result.review_path.with_name('review.html')
+            result.review_path.rename(old)
+            again=trace(icon(),'#ffffff',cache_dir=folder)
+            self.assertEqual(again.review_path.name,'index.html')
+            self.assertTrue(again.review_path.is_file())
+            self.assertFalse(old.exists())
 
     def test_review_can_be_rebuilt_from_summary_after_database_closes(self):
         with TemporaryDirectory() as folder:

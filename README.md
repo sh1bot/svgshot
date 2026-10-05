@@ -127,13 +127,14 @@ artwork. The cache holds each observed icon crop as a PNG and editable,
 standalone SVGs for each tracing algorithm. Edit an SVG in the cache and the
 next conversion will use your changes. `--icon-cache-dir DIR` selects its
 location; `--no-icon-cache` disables it. The default is the system user cache
-directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops may
-contain visible screen content and accessible names, so inspect the cache
-before sharing it. One HTML review page per matched icon group compares all
+directory (`svgshot/traces`), or `SVGSHOT_ICON_CACHE` if set. Source crops and
+recorded image paths may contain screen content and personal names; inspect the cache
+before sharing it. One HTML overview per matched icon group compares all
 matched bitmap crops at 16× nearest-neighbour scale with every algorithm's SVG.
 It also shows selected palette swatches with grid pixel counts, the foreground
 target, quantized image, visible islands, ordered
-contour masks, and SVG beside the accessible names, offsets, and quality metrics.
+contour masks, and SVG beside the source image names, accessible names, offsets,
+and quality metrics.
 The page uses a diagonal checker to reveal transparency, with a switch to show
 the captured background.
 The images for older traces are restored when their regenerated SVG matches the
@@ -145,14 +146,14 @@ cache_dir=...)` accepts a cropped Pillow image and RGB colour (`"#ffffff"` or
 an RGB triple). The result contains `.svg` (the standalone file contents),
 `.svg_path`, `.review_path`, `.node` (artwork ready for a scene), `.group_id`,
 `.source_hash`, `.offset`, and `.match`. The optional `name` argument records an
-accessible label for the source bitmap. `algorithm="smooth-palette"` selects the
+accessible label; `source_image` records the input image path. `algorithm="smooth-palette"` selects the
 smoothed tracer; `algorithm="pixel-boundary"` selects exact grid tracing.
 `estimate_alpha=True` opts into transparency inferred from the background;
 the default uses the background as a palette reference without exporting it.
 To trace one crop from a shell, run
 `svgshot-trace icon.png '#ffffff' --cache-dir ./icon-cache`; it prints the SVG
 file to edit. Canonical PNGs and editable SVGs live under `groups/<id>/`;
-`summaries/<id>/` holds one `review.html` and the trace previews. Its links
+`summaries/<id>/` holds one `index.html` and the trace previews. Its links
 point to the canonical files.
 
 ## Capture data

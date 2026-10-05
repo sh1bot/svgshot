@@ -12,17 +12,35 @@ from svgshot.snapshot import embed_snapshot
 
 
 class ConversionTests(unittest.TestCase):
+    def test_input_image_is_recorded_in_icon_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            source=root/'source.png'
+            image=Image.new('RGB',(24,24),'white')
+            from PIL import ImageDraw
+            ImageDraw.Draw(image).rectangle((4,4,15,19),fill=(20,80,220))
+            image.save(source)
+            scene=Node('window',(0,0,24,24),color='#ffffff',children=[
+                Node('raster',(0,0,24,24))])
+            with patch('svgshot.cli.reconstruct',return_value=scene):
+                self.assertEqual(main([str(source),str(root/'result.svg'),
+                                       '--icon-cache-dir',str(root/'cache')]),0)
+            summaries=list((root/'cache'/'summaries').glob('*/index.html'))
+            self.assertEqual(len(summaries),1)
+            self.assertIn(str(source.resolve()),summaries[0].read_text())
+
     def test_pixel_boundary_mode_reaches_shared_conversion_options(self):
         with tempfile.TemporaryDirectory() as directory:
             source=Path(directory)/'source.png'
             Image.new('RGB',(24,24),'white').save(source)
             seen=[]
             with patch('svgshot.cli.reconstruct',side_effect=lambda image,options,**kwargs:
-                       (seen.append((options.pixel_boundary_icons,options.estimate_alpha)) or
+                       (seen.append((options.pixel_boundary_icons,options.estimate_alpha,
+                                     kwargs['source_image'])) or
                         Node('window',(0,0,24,24),color='#ffffff'))):
                 self.assertEqual(main([str(source),str(source.with_suffix('.svg')),
                                        '--pixel-boundary-icons','--estimate-alpha']),0)
-            self.assertEqual(seen,[(True,True)])
+            self.assertEqual(seen,[(True,True,str(source.resolve()))])
 
     def test_shared_options_reports_and_missing_metadata_warning(self):
         with tempfile.TemporaryDirectory() as directory:

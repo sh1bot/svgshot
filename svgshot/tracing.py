@@ -336,6 +336,9 @@ class TraceCache:
             CREATE TABLE IF NOT EXISTS names (
               hash TEXT NOT NULL REFERENCES bitmaps(hash), name TEXT NOT NULL,
               PRIMARY KEY (hash, name));
+            CREATE TABLE IF NOT EXISTS source_images (
+              hash TEXT NOT NULL REFERENCES bitmaps(hash), image TEXT NOT NULL,
+              PRIMARY KEY (hash, image));
             CREATE INDEX IF NOT EXISTS bitmap_search ON bitmaps(background,width,height);
         ''')
         if 'hints' not in [row[1] for row in self.db.execute('PRAGMA table_info(traces)')]:
@@ -376,7 +379,7 @@ class TraceCache:
         return self.root/'summaries'/group
 
     def _review_path(self, group):
-        return self._summary_path(group)/'review.html'
+        return self._summary_path(group)/'index.html'
 
     def _preview_path(self, group, algorithm, stage):
         return self._summary_path(group)/f'{algorithm}.{stage}.png'
@@ -396,12 +399,17 @@ class TraceCache:
         for digest,name in self.db.execute('''SELECT n.hash,n.name FROM names n
             JOIN bitmaps b ON b.hash=n.hash WHERE b.group_id=? ORDER BY n.name''',(group,)):
             names.setdefault(digest,[]).append(name)
+        images={}
+        for digest,image in self.db.execute('''SELECT s.hash,s.image FROM source_images s
+            JOIN bitmaps b ON b.hash=s.hash WHERE b.group_id=? ORDER BY s.image''',(group,)):
+            images.setdefault(digest,[]).append(image)
         for digest,width,height,dx,dy,kind in self.db.execute('''
                 SELECT hash,width,height,dx,dy,match_kind FROM bitmaps
                 WHERE group_id=?''',(group,)):
             self._summary_json(directory/f'{digest}.source.json',
                 {'hash':digest,'width':width,'height':height,'dx':dx,'dy':dy,
-                 'match_kind':kind,'names':names.get(digest,[])})
+                 'match_kind':kind,'names':names.get(digest,[]),
+                 'images':images.get(digest,[])})
         for algorithm,status,hints,generated_hash in self.db.execute('''
                 SELECT algorithm,status,hints,generated_hash FROM traces
                 WHERE group_id=?''',(group,)):
@@ -413,6 +421,7 @@ class TraceCache:
         """Move former SVG-adjacent diagnostics into a separate review tree."""
         directory = self.root/'groups'/group/'algorithms'
         (self.root/'groups'/group/'review.html').unlink(missing_ok=True)
+        (self._summary_path(group)/'review.html').unlink(missing_ok=True)
         for algorithm, in self.db.execute('SELECT algorithm FROM traces WHERE group_id=?',
                                           (group,)).fetchall():
             old_paths=list(directory.glob(f'{algorithm}.*'))
@@ -508,7 +517,8 @@ class TraceCache:
                    item['match_kind']) for item in sources]
         if not variants:
             return
-        by_hash={item['hash']:item['names'] for item in sources}
+        by_hash={item['hash']:item.get('names',[]) for item in sources}
+        by_image={item['hash']:item.get('images',[]) for item in sources}
         records=[json.loads(path.read_text(encoding='utf-8'))
                  for path in directory.glob('*.trace.json')]
         records.sort(key=lambda item:item['algorithm'])
@@ -518,8 +528,10 @@ class TraceCache:
         observations = []
         for index,(digest,width,height,dx,dy,match_kind) in enumerate(variants,1):
             names = by_hash.get(digest,[])
+            images = by_image.get(digest,[])
             label = ', '.join(names) if names else 'Unlabelled bitmap'
             labels = ''.join(f'<li>{escape(name)}</li>' for name in names)
+            sources_html = ''.join(f'<li><code>{escape(path)}</code></li>' for path in images)
             observations.append(
                 f'<article><h3>Bitmap {index}: {escape(label)}</h3>'
                 f'<img class="source-preview" src="../../groups/{group}/bitmaps/{digest}.png" '
@@ -530,6 +542,7 @@ class TraceCache:
                 f'<dt>Match</dt><dd>{escape(match_kind)}</dd>'
                 f'<dt>Offset</dt><dd>({dx:g}, {dy:g}) pixels</dd></dl>'
                 f'{"<p>Accessible name(s):</p><ul>"+labels+"</ul>" if names else ""}'
+                f'{"<p>Used by image(s):</p><ul>"+sources_html+"</ul>" if images else ""}'
                 '</article>')
         diagnostics = (('approximation','Approximation'),('silhouette_iou','Silhouette IoU'),
                        ('colour_error','Colour error'),('palette_size','Palette colours'),
@@ -643,7 +656,7 @@ class TraceCache:
             _atomic_bytes(page,data)
 
     def trace(self, image, background, *, algorithm='palette', palette_size=None, blur=.5,
-              allow_raster=True, name=None, estimate_alpha=False):
+              allow_raster=True, name=None, estimate_alpha=False, source_image=None):
         image = image.copy()
         if not image.width or not image.height:
             raise ValueError('The image to trace must be nonempty')
@@ -765,6 +778,12 @@ class TraceCache:
                 with self.db:
                     changed |= bool(self.db.execute(
                         'INSERT OR IGNORE INTO names VALUES (?,?)',(digest,name)).rowcount)
+        if isinstance(source_image,os.PathLike):
+            source_image=os.fspath(source_image)
+        if isinstance(source_image,str) and source_image.strip():
+            with self.db:
+                changed |= bool(self.db.execute('INSERT OR IGNORE INTO source_images VALUES (?,?)',
+                                                (digest,source_image.strip())).rowcount)
         if not existing:
             changed = True
             status = 'vector' if candidate_svg else 'raster' if node is not None else 'empty'
@@ -810,7 +829,8 @@ class TraceCache:
 
 
 def trace(image, background, *, cache_dir=None, algorithm='palette', palette_size=None,
-          blur=.5, allow_raster=True, name=None, estimate_alpha=False):
+          blur=.5, allow_raster=True, name=None, estimate_alpha=False,
+          source_image=None):
     """Trace an image over RGB background, returning an inline node and SVG.
 
     The SVG on disk is the source of truth on every cache hit. ``cache_dir``
@@ -820,7 +840,8 @@ def trace(image, background, *, cache_dir=None, algorithm='palette', palette_siz
     with TraceCache(cache_dir) as cache:
         return cache.trace(image,background,algorithm=algorithm,
                            palette_size=palette_size,blur=blur,allow_raster=allow_raster,
-                           name=name,estimate_alpha=estimate_alpha)
+                           name=name,estimate_alpha=estimate_alpha,
+                           source_image=source_image)
 
 
 def main(argv=None):
@@ -842,7 +863,8 @@ def main(argv=None):
         result=trace(image,args.background,cache_dir=args.cache_dir,
                      algorithm=args.algorithm,palette_size=args.palette_size,
                      blur=args.blur,name=args.name,
-                     estimate_alpha=args.estimate_alpha)
+                     estimate_alpha=args.estimate_alpha,
+                     source_image=str(args.image.resolve()))
     if result.svg_path:
         print(result.svg_path)
         return 0
