@@ -151,6 +151,8 @@ def _filename(algorithm, palette_size, blur, *, version=VERSION,
         raise ValueError('algorithm names must use letters, digits, hyphens or underscores')
     settings = [version,algorithm,palette_size,
                 blur if algorithm == 'smooth-palette' else None]
+    if algorithm == 'smooth-palette':
+        settings.append('background-edge-padding-v1')
     if not estimate_alpha:
         settings.append('no-estimated-alpha')
     settings = json.dumps(settings,separators=(',', ':'))

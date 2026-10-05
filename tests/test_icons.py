@@ -25,6 +25,23 @@ def render_svg(svg, width):
 
 
 class IconTests(unittest.TestCase):
+    def test_smoothing_uses_background_beyond_crop_edges(self):
+        patch=Image.new('RGBA',(8,8),(20,80,220,255))
+        palette=np.array([[255,255,255],[20,80,220]],dtype=np.uint8)
+        opaque=_smooth_quantize(patch,palette,1.5,
+                                background=(255,255,255),background_alpha=255)
+        self.assertEqual(opaque.getpixel((0,0)),(255,255,255,255))
+        self.assertEqual(opaque.getpixel((16,16)),(20,80,220,255))
+        expanded=Image.new('RGBA',(32,32),(255,255,255,255))
+        expanded.paste(patch,(12,12))
+        reference=_smooth_quantize(expanded,palette,1.5,
+                                   background=(255,255,255),background_alpha=255)
+        np.testing.assert_array_equal(np.asarray(opaque),
+                                      np.asarray(reference.crop((48,48,80,80))))
+        transparent=_smooth_quantize(patch,palette,1.5,
+                                     background=(255,255,255),background_alpha=0)
+        self.assertLess(transparent.getpixel((0,0))[3],255)
+
     def test_scene_shares_one_cache_connection_across_icons(self):
         image=Image.new('RGB',(48,24),'white')
         draw=ImageDraw.Draw(image)

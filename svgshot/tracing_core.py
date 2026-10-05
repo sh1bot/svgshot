@@ -297,18 +297,29 @@ def _palette_counts(monochrome, palette_size):
     return (palette_size,) if palette_size is not None else ((1,) if monochrome else (4, 8, 12))
 
 
-def _smooth_quantize(patch, palette, blur):
+def _smooth_quantize(patch, palette, blur, *, background=None, background_alpha=None):
     """Blur first, bicubic 4x second, then nearest palette RGB, no dither.
 
     Filter premultiplied RGBA so invisible RGB never bleeds into the boundary.
-    Alpha stays separate from the RGB palette and is used for silhouette tracing.
+    Pad with the surrounding background so neither filter clamps crop-edge ink.
     """
-    rgba = np.asarray(patch.convert('RGBA')).astype(float)
+    patch = patch.convert('RGBA')
+    if background is None:
+        background = _background_color(patch,(0,0,*patch.size))
+    if background_alpha is None:
+        background_alpha = 255 if patch.getchannel('A').getextrema() == (255,255) else 0
+    padding = max(3,int(np.ceil(3*blur+3)))
+    padded = Image.new('RGBA',(patch.width+2*padding,patch.height+2*padding),
+                       tuple(int(c) for c in background)+(background_alpha,))
+    padded.paste(patch,(padding,padding))
+    rgba = np.asarray(padded).astype(float)
     rgba[:, :, :3] *= rgba[:, :, 3:] / 255
     # RGBa tells Pillow the channels are already premultiplied during resize.
     premultiplied = Image.fromarray(np.rint(rgba).astype('uint8'), 'RGBa')
     filtered = premultiplied.filter(ImageFilter.GaussianBlur(blur)).resize(
-        (patch.width * 4, patch.height * 4), Image.Resampling.BICUBIC)
+        (padded.width * 4, padded.height * 4), Image.Resampling.BICUBIC)
+    filtered = filtered.crop((padding*4,padding*4,
+                             (padding+patch.width)*4,(padding+patch.height)*4))
     pixels = np.asarray(filtered).astype(float)
     rgb = np.clip(pixels[:, :, :3] * 255 / np.maximum(pixels[:, :, 3:], 1), 0, 255)
     # Bound temporary memory for the largest eligible icons and palettes.
@@ -516,14 +527,16 @@ def _curve_contour(points, tolerance, *, prefer_lines=True):
 
 
 def _smooth_candidate(target, box, palette_size, blur, *, capture=False,
-                      background=None):
+                      background=None, edge_background=None):
     x, y, w, h = box
     palette = _trace_palette(target, palette_size, background)
     if not len(palette):
         return None
     # Isolate foreground once, before filtering. Background colours must not
     # consume palette slots or become foreground when quantized to this palette.
-    prepared = _smooth_quantize(target, palette, blur)
+    prepared = _smooth_quantize(target, palette, blur,
+                                background=edge_background,
+                                background_alpha=255 if background is not None else 0)
     pixels = np.asarray(prepared)
     visible = pixels[:, :, 3] > max(8, float(pixels[:, :, 3].max())*.35)
     indices = ((pixels[:, :, :3].astype(float)[:, :, None]-palette[None, None])**2).sum(axis=3).argmin(axis=2)
@@ -673,7 +686,9 @@ def simplify_icon(image, box, *, allow_raster=True, smooth=False, palette_size=N
                                      background=background if not estimate_alpha else None)
         choices = [_smooth_candidate(target, box, count, blur,
                                      capture=previews is not None,
-                                     background=background if not estimate_alpha else None)
+                                     background=background if not estimate_alpha else None,
+                                     edge_background=(background if background is not None else
+                                                      _background_color(image,box)))
                    for count in _palette_counts(monochrome, palette_size)]
         return min((choice for choice in choices if choice is not None),
                    key=lambda choice: choice[0], default=None)
